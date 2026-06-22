@@ -1,4 +1,5 @@
 name: Steam Weekly Report
+# Runs every Monday at 09:00 WIB on GitHub's servers — laptop does not need to be on
 
 on:
   schedule:
