@@ -1,0 +1,112 @@
+[
+  {
+    "studio": "Toby Fox",
+    "known_for": "Undertale, Deltarune",
+    "category": "Indie Auteur",
+    "tracked_games": [
+      {"name": "Deltarune (Chapters 3-7)", "appid": 1671210, "status": "In Development"}
+    ]
+  },
+  {
+    "studio": "Freebird Games (Kan Gao)",
+    "known_for": "To the Moon, Finding Paradise, Impostor Factory",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Team Cherry",
+    "known_for": "Hollow Knight",
+    "category": "Indie Cult",
+    "tracked_games": [
+      {"name": "Hollow Knight: Silksong", "appid": 1030300, "status": "In Development"}
+    ]
+  },
+  {
+    "studio": "Edmund McMillen",
+    "known_for": "The Binding of Isaac, Super Meat Boy, The End Is Nigh",
+    "category": "Indie Auteur",
+    "tracked_games": [
+      {"name": "Mewgenics", "appid": null, "status": "In Development"}
+    ]
+  },
+  {
+    "studio": "Lucas Pope",
+    "known_for": "Papers Please, Return of the Obra Dinn",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Dennaton Games (Jonatan Söderström / Cactus)",
+    "known_for": "Hotline Miami 1 & 2",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Devolver Digital (publisher, not studio)",
+    "known_for": "Hotline Miami, Carrion, Enter the Gungeon, Inscryption — publisher with cult taste",
+    "category": "Cult Publisher",
+    "tracked_games": []
+  },
+  {
+    "studio": "Grasshopper Manufacture (Suda51)",
+    "known_for": "No More Heroes, Killer7, Travis Strikes Again, Shadows of the Damned",
+    "category": "Cult AAA-Adjacent",
+    "tracked_games": []
+  },
+  {
+    "studio": "Kojima Productions",
+    "known_for": "Death Stranding, Metal Gear Solid series",
+    "category": "Cult AAA-Adjacent",
+    "tracked_games": [
+      {"name": "Death Stranding 2: On the Beach", "appid": null, "status": "In Development"}
+    ]
+  },
+  {
+    "studio": "thatgamecompany (Jenova Chen)",
+    "known_for": "Journey, Flower, Sky: Children of the Light",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Airdorf Games",
+    "known_for": "Faith: The Unholy Trinity",
+    "category": "Indie Cult",
+    "tracked_games": []
+  },
+  {
+    "studio": "Arvi Teikari (Hempuli)",
+    "known_for": "Baba Is You",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Daniel Mullins Games",
+    "known_for": "Inscryption, Pony Island, The Hex",
+    "category": "Indie Auteur",
+    "tracked_games": []
+  },
+  {
+    "studio": "Mobius Digital",
+    "known_for": "Outer Wilds",
+    "category": "Indie Cult",
+    "tracked_games": []
+  },
+  {
+    "studio": "Kitty Horrorshow",
+    "known_for": "Anatomy, CHYRZA, Haunted Cities",
+    "category": "Indie Cult",
+    "tracked_games": []
+  },
+  {
+    "studio": "Crows Crows Crows (William Pugh / Tom Jubert)",
+    "known_for": "The Stanley Parable: Ultra Deluxe, Dr. Langeskov",
+    "category": "Indie Cult",
+    "tracked_games": []
+  },
+  {
+    "studio": "Nolla Games (Petri Purho / Arvi Teikari)",
+    "known_for": "Noita",
+    "category": "Indie Cult",
+    "tracked_games": []
+  }
+]

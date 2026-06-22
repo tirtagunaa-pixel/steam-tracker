@@ -1,0 +1,29 @@
+name: Steam Weekly Report
+
+on:
+  schedule:
+    - cron: '0 2 * * 1'   # 02:00 UTC Monday = 09:00 WIB Monday
+  workflow_dispatch:        # allow manual run from GitHub UI
+
+jobs:
+  weekly-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write credentials
+        run: |
+          mkdir -p output
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > scripts/service_account.json
+          echo '${{ secrets.WATCH_CONFIG }}' > scripts/watch_config.json
+
+      - name: Weekly AI summary + Seatalk report
+        run: python scripts/steam_wishlist_tracker.py --mode weekly

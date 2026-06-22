@@ -1,0 +1,32 @@
+name: Steam Daily Capture
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 01:00 UTC = 08:00 WIB (UTC+7)
+  workflow_dispatch:        # allow manual run from GitHub UI
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write credentials
+        run: |
+          mkdir -p output
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > scripts/service_account.json
+          echo '${{ secrets.WATCH_CONFIG }}' > scripts/watch_config.json
+
+      - name: Daily wishlist capture
+        run: python scripts/steam_wishlist_tracker.py --mode daily
+
+      - name: Player count & studio watch update
+        run: python scripts/update_steam_watch.py

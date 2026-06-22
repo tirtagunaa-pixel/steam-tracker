@@ -1,0 +1,27 @@
+# Credentials — NEVER commit these
+scripts/service_account.json
+scripts/watch_config.json
+scripts/*.xml
+credentials.json
+token.json
+.gdoc_id
+compass-full-everything.md
+
+# Local output and cache
+output/
+*.lnk
+
+# Claude internal
+.claude/
+plans/
+memory/
+
+# Other projects in this folder
+n8n-skills/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
