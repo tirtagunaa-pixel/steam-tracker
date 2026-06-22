@@ -21,10 +21,13 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Write credentials
+        env:
+          GOOGLE_SA: ${{ secrets.GOOGLE_SERVICE_ACCOUNT }}
+          WATCH_CFG: ${{ secrets.WATCH_CONFIG }}
         run: |
           mkdir -p output
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT }}' > scripts/service_account.json
-          echo '${{ secrets.WATCH_CONFIG }}' > scripts/watch_config.json
+          python3 -c "import os; s=os.environ['GOOGLE_SA']; i=s.find('{'); open('scripts/service_account.json','w').write(s[i:] if i>=0 else s)"
+          python3 -c "import os; s=os.environ['WATCH_CFG']; i=s.find('{'); open('scripts/watch_config.json','w').write(s[i:] if i>=0 else s)"
 
       - name: Daily wishlist capture
         run: python scripts/steam_wishlist_tracker.py --mode daily
