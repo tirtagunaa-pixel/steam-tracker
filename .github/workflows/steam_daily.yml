@@ -1,5 +1,5 @@
 name: Steam Daily Capture
-# Runs daily at 08:00 WIB on GitHub's servers — laptop does not need to be on
+# Runs daily at 08:00 WIB on GitHub's servers (public repo — reliable schedule)
 
 on:
   schedule:
