@@ -2,7 +2,8 @@
 Steam Wishlist Tracker — Daily capture + Weekly AI report
 ----------------------------------------------------------
 Modes:
-  --mode daily   Fetch today's Top 15 wishlist chart and append to 'Wishlist History' sheet.
+  --mode daily   Fetch today's Top 100 wishlist chart and append to 'Wishlist History' sheet.
+                 Flags significant movers (new entries or 20+ rank jump) and sends a Seatalk alert.
                  Run every day at 08:00 via Task Scheduler.
 
   --mode weekly  Analyse the previous Mon–Sun from 'Wishlist History', generate an AI
@@ -48,7 +49,7 @@ SUMMARY_SHEET = "Weekly Wishlist Summary"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndieGameResearch/1.0)"}
 
-TOP_N = 25  # Steam's popularwishlist endpoint returns 25 results regardless of count param
+TOP_N = 100  # fetched via two paginated requests (start=0 and start=50, count=50 each)
 
 # ── Config loader ─────────────────────────────────────────────────────────────
 
@@ -74,23 +75,30 @@ def get_or_create_worksheet(spreadsheet, name, rows=2000, cols=12):
 
 # ── Steam API helpers (reused from update_steam_watch.py) ────────────────────
 
-def steam_search_wishlist(max_results=15):
+def steam_search_wishlist(max_results=100):
+    """Fetch up to max_results games via paginated calls (50 per page)."""
     url = "https://store.steampowered.com/search/results/"
-    params = {"filter": "popularwishlist", "json": 1, "count": max_results, "start": 0}
-    try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("items", [])
-        # Extract appid from logo URL: .../apps/<appid>/...
-        for item in items:
-            logo = item.get("logo", "")
-            m = re.search(r"/apps/(\d+)/", logo)
-            item["appid"] = m.group(1) if m else ""
-        return items
-    except Exception as e:
-        print(f"  [Wishlist] API error: {e}")
-        return []
+    all_items = []
+    batch = 50
+    for start in range(0, max_results, batch):
+        count = min(batch, max_results - start)
+        params = {"filter": "popularwishlist", "json": 1, "count": count, "start": start}
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items", [])
+            for item in items:
+                logo = item.get("logo", "")
+                m = re.search(r"/apps/(\d+)/", logo)
+                item["appid"] = m.group(1) if m else ""
+            all_items.extend(items)
+            if len(items) < count:
+                break  # API returned fewer than requested — no more results
+        except Exception as e:
+            print(f"  [Wishlist] API error at start={start}: {e}")
+            break
+    return all_items[:max_results]
 
 
 def steam_appdetails(appid):
@@ -171,13 +179,31 @@ def fetch_game_news(appid, game_name, count=3):
 
 def run_daily(spreadsheet, dry_run=False):
     today = datetime.now().strftime("%Y-%m-%d")
+    config = load_config()
 
+    ws = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=50000, cols=11)
+
+    # Read existing sheet data: used for duplicate guard + yesterday's rank comparison
     if not dry_run:
-        ws_check = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=5000, cols=10)
-        existing = ws_check.get_all_values()
+        existing = ws.get_all_values()
         if any(row and row[0] == today for row in existing[1:]):
             print(f"  Already captured data for {today}. Skipping duplicate run.")
             return
+    else:
+        existing = []
+
+    # Build dict of yesterday's ranks {game_name: rank} from the most recent prior date
+    prior_ranks = {}
+    if len(existing) > 1:
+        dates_seen = [row[0] for row in existing[1:] if row and row[0] and row[0] != today]
+        if dates_seen:
+            latest_prior = max(dates_seen)
+            for row in existing[1:]:
+                if row and len(row) >= 3 and row[0] == latest_prior:
+                    try:
+                        prior_ranks[row[2]] = int(row[1])
+                    except (ValueError, IndexError):
+                        pass
 
     print(f"  Fetching Top {TOP_N} wishlist chart for {today}...")
 
@@ -186,7 +212,10 @@ def run_daily(spreadsheet, dry_run=False):
         print("  ERROR: No data returned from Steam. Aborting.")
         return
 
+    new_entries  = []   # (name, rank)
+    big_climbers = []   # (name, old_rank, new_rank, delta)
     rows = []
+
     for rank, item in enumerate(items, start=1):
         appid = item.get("appid", "")
         name  = item.get("name", "Unknown")
@@ -201,39 +230,67 @@ def run_daily(spreadsheet, dry_run=False):
             spy = steamspy_data(appid)
             time.sleep(0.5)
 
+        # Compute rank change vs yesterday
+        if name not in prior_ranks:
+            rank_change = "NEW"
+            new_entries.append((name, rank))
+        else:
+            delta = prior_ranks[name] - rank  # positive = climbed
+            rank_change = f"+{delta}" if delta > 0 else str(delta)
+            if delta >= 20:
+                big_climbers.append((name, prior_ranks[name], rank, delta))
+
         rows.append([
-            today,
-            rank,
-            name,
-            str(appid),
+            today, rank, name, str(appid),
             details.get("developer", "—"),
             details.get("publisher", "—"),
             details.get("genres", "—"),
             details.get("release_date", item.get("release_date", "—")),
             spy["wishlists"],
             spy["owners"],
+            rank_change,
         ])
-        print(f"    #{rank:02d} {name}")
+        print(f"    #{rank:02d} {name}  [{rank_change}]")
 
     if dry_run:
         print(f"\n  [DRY RUN] Would append {len(rows)} rows to '{HISTORY_SHEET}'.")
         for r in rows[:3]:
             print(f"    {r}")
+        if new_entries or big_climbers:
+            print(f"\n  [DRY RUN] Significant movers:")
+            for name, rank in new_entries[:5]:
+                print(f"    🆕 NEW: {name} (#{rank})")
+            for name, old, new_rank, delta in big_climbers:
+                print(f"    ⬆ CLIMBER: {name}: #{old} → #{new_rank} (+{delta})")
         return
 
-    ws = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=5000, cols=10)
-
-    # Write header if sheet is empty
-    existing = ws.get_all_values()
+    # Ensure "Rank Change" header exists in column 11
     if not existing:
         ws.append_row(
             ["Date", "Rank", "Game Name", "AppID", "Developer", "Publisher",
-             "Genre", "Release Date", "Wishlist Est.", "Owners Est."],
+             "Genre", "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change"],
             value_input_option="USER_ENTERED",
         )
+    elif len(existing[0]) < 11 or existing[0][10] != "Rank Change":
+        ws.update_cell(1, 11, "Rank Change")
 
     ws.append_rows(rows, value_input_option="USER_ENTERED")
     print(f"  Appended {len(rows)} rows to '{HISTORY_SHEET}'.")
+
+    # Send Seatalk movers alert if there are significant movers
+    if new_entries or big_climbers:
+        mover_lines = [f"🚀 **Steam Wishlist Movers — {today}**", ""]
+        if new_entries:
+            mover_lines.append("🆕 **New to Top 100:**")
+            for name, rank in new_entries:
+                mover_lines.append(f"• {name} (entered at #{rank})")
+        if big_climbers:
+            if new_entries:
+                mover_lines.append("")
+            mover_lines.append("⬆️ **Big Climbers (20+ positions):**")
+            for name, old, new_rank, delta in big_climbers:
+                mover_lines.append(f"• {name}: #{old} → #{new_rank} (+{delta})")
+        send_to_seatalk(config, "\n".join(mover_lines))
 
 # ── Mode: WEEKLY ──────────────────────────────────────────────────────────────
 
@@ -444,12 +501,22 @@ def build_ai_prompt(week_start, week_end, analysis, prior_summaries, game_news=N
     if prior_summaries:
         last_n = prior_summaries[-6:]  # up to 6 prior weeks for context
         prior_context = "Prior weekly summaries (oldest to newest):\n"
-        for s in last_n:
+        for s in last_n[:-1]:  # older weeks: structural only
             prior_context += (
                 f"  Week {s.get('Week #', '?')} ({s.get('Week Start', '')}–{s.get('Week End', '')}): "
                 f"Top 5 stable: {s.get('Top 5 Stable', '—')} | "
                 f"New entrants: {s.get('New Entrants', '—')} | "
                 f"Exits: {s.get('Exits', '—')}\n"
+            )
+        if last_n:  # most recent prior week: include full AI commentary
+            last = last_n[-1]
+            prior_context += (
+                f"\nLast week — Week {last.get('Week #', '?')} "
+                f"({last.get('Week Start', '')}–{last.get('Week End', '')}):\n"
+                f"  Top 5 stable: {last.get('Top 5 Stable', '—')}\n"
+                f"  New entrants: {last.get('New Entrants', '—')} | "
+                f"Exits: {last.get('Exits', '—')}\n"
+                f"  Last week's trend analysis:\n    {last.get('AI Commentary', '(none)')}\n"
             )
         prior_context += "\n"
 
@@ -478,7 +545,10 @@ Games that dropped out of Top 15:
 
 {genre_block}
 {news_block}
-{prior_context}Write your analysis as bullet points only — one bullet per insight, each a single short sentence (max 20 words). Use • as the bullet character. For any cited news or article include the URL inline formatted as [Source](url). Write 5–8 bullets total."""
+{prior_context}Write 5–8 bullet points using • as the bullet character. Follow this structure exactly:
+• First bullet MUST start with "vs last week:" — compare directly to last week's trend analysis above. Call out what stayed the same, what shifted (rank changes, new entries, exits), and whether the trend is continuing or reversing.
+• Remaining bullets: one insight per bullet about WHY a game is rising/falling or WHY a genre is dominating — draw from the news snippets provided. Every news citation MUST include the URL formatted as [Source Name](url).
+• Max 20 words per bullet (not counting the URL)."""
 
     return prompt
 

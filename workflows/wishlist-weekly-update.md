@@ -7,9 +7,9 @@ Tracks the Steam Wishlist chart daily, generates an AI-analysed weekly summary, 
 ## How It Works
 
 **Daily (08:00 every day)**
-- Fetches today's Top 15 most-wishlisted upcoming games on Steam
-- Appends one row per game to the **Wishlist History** Google Sheet tab
-- No notification sent — pure data capture
+- Fetches today's Top 100 most-wishlisted upcoming games on Steam (via two paginated API calls)
+- Appends one row per game to the **Wishlist History** Google Sheet tab, including a **Rank Change** column (NEW / +X / -X vs prior day)
+- If any game is a new Top 100 entry or climbed 20+ positions, sends a Seatalk movers alert
 
 **Weekly (Monday 09:00)**
 - Reads the previous Mon–Sun from Wishlist History
@@ -112,7 +112,10 @@ Game F, Game G, Game H
 • Game L
 
 🤖 Trend Analysis
-[AI-generated paragraph from Compass Claude API, drawing on all prior weeks]
+• vs last week: [comparison — what stayed the same, what shifted, why]
+• [WHY insight for top game] [Source Name](url)
+• [WHY insight for genre trend] [Source Name](url)
+... (5–8 bullets total; every cited fact includes a source URL)
 ```
 
 ---
@@ -133,3 +136,5 @@ Game F, Game G, Game H
 - [ ] Seatalk group received the formatted message
 - [ ] `output/wishlist_tracker_log.txt` shows no error lines
 - [ ] AI Commentary in Summary tab reads coherently and references prior weeks
+- [ ] AI Commentary first bullet starts with "vs last week:"
+- [ ] At least one bullet contains a [Source](url) link
