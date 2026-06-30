@@ -182,6 +182,8 @@ def run_daily(spreadsheet, dry_run=False):
     config = load_config()
 
     ws = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=50000, cols=11)
+    # Ensure the sheet has enough columns/rows (in case it existed before the Top 100 expansion)
+    ws.resize(rows=50000, cols=11)
 
     # Read existing sheet data: used for duplicate guard + yesterday's rank comparison
     if not dry_run:
