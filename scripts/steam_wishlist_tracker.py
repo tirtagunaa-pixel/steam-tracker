@@ -44,12 +44,38 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-HISTORY_SHEET = "Wishlist History"
-SUMMARY_SHEET = "Weekly Wishlist Summary"
+HISTORY_SHEET  = "Wishlist History"
+SUMMARY_SHEET  = "Weekly Wishlist Summary"
+SNAPSHOT_SHEET = "Wishlist"  # live current-state view, overwritten daily
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndieGameResearch/1.0)"}
 
 TOP_N = 100  # fetched via two paginated requests (start=0 and start=50, count=50 each)
+
+AAA_PUBLISHERS = {
+    "ubisoft", "electronic arts", "ea games", "capcom", "activision", "blizzard",
+    "take-two", "rockstar games", "2k games", "square enix", "sega",
+    "bandai namco", "konami", "bethesda", "xbox game studios", "microsoft",
+    "playstation studios", "sony interactive", "warner bros", "cd projekt",
+    "riot games", "epic games", "valve", "505 games", "deep silver",
+    "thq nordic", "focus entertainment", "nacon", "4a games",
+}
+
+TIER_EMOJI = {"Indie": "🎮", "Triple A": "🏢", "AA": "🔷", "Early Access": "🧪"}
+
+def classify_game(genre, publisher, developer):
+    """Return 'Triple A', 'Indie', 'Early Access', or 'AA' (mid-tier)."""
+    genre_l = (genre or "").lower()
+    pub_l   = (publisher or "").lower()
+    dev_l   = (developer or "").lower()
+    if "early access" in genre_l:
+        return "Early Access"
+    for aaa in AAA_PUBLISHERS:
+        if aaa in pub_l or aaa in dev_l:
+            return "Triple A"
+    if "indie" in genre_l:
+        return "Indie"
+    return "AA"
 
 # ── Config loader ─────────────────────────────────────────────────────────────
 
@@ -214,8 +240,8 @@ def run_daily(spreadsheet, dry_run=False):
         print("  ERROR: No data returned from Steam. Aborting.")
         return
 
-    new_entries  = []   # (name, rank)
-    big_climbers = []   # (name, old_rank, new_rank, delta)
+    new_entries  = []   # (name, rank, tier)
+    big_climbers = []   # (name, old_rank, new_rank, delta, tier)
     rows = []
 
     for rank, item in enumerate(items, start=1):
@@ -232,15 +258,21 @@ def run_daily(spreadsheet, dry_run=False):
             spy = steamspy_data(appid)
             time.sleep(0.5)
 
+        tier = classify_game(
+            details.get("genres", "—"),
+            details.get("publisher", "—"),
+            details.get("developer", "—"),
+        )
+
         # Compute rank change vs yesterday
         if name not in prior_ranks:
             rank_change = "NEW"
-            new_entries.append((name, rank))
+            new_entries.append((name, rank, tier))
         else:
             delta = prior_ranks[name] - rank  # positive = climbed
             rank_change = f"+{delta}" if delta > 0 else str(delta)
             if delta >= 20:
-                big_climbers.append((name, prior_ranks[name], rank, delta))
+                big_climbers.append((name, prior_ranks[name], rank, delta, tier))
 
         rows.append([
             today, rank, name, str(appid),
@@ -252,18 +284,18 @@ def run_daily(spreadsheet, dry_run=False):
             spy["owners"],
             rank_change,
         ])
-        print(f"    #{rank:02d} {name}  [{rank_change}]")
+        print(f"    #{rank:02d} [{tier[:3]}] {name}  [{rank_change}]")
 
     if dry_run:
         print(f"\n  [DRY RUN] Would append {len(rows)} rows to '{HISTORY_SHEET}'.")
         for r in rows[:3]:
             print(f"    {r}")
         if new_entries or big_climbers:
-            print(f"\n  [DRY RUN] Significant movers:")
-            for name, rank in new_entries[:5]:
-                print(f"    🆕 NEW: {name} (#{rank})")
-            for name, old, new_rank, delta in big_climbers:
-                print(f"    ⬆ CLIMBER: {name}: #{old} → #{new_rank} (+{delta})")
+            print(f"\n  [DRY RUN] Significant movers (by tier):")
+            for name, rank, tier in new_entries[:5]:
+                print(f"    {TIER_EMOJI.get(tier,'?')} NEW [{tier}]: {name} (#{rank})")
+            for name, old, new_rank, delta, tier in big_climbers:
+                print(f"    {TIER_EMOJI.get(tier,'?')} CLIMBER [{tier}]: {name}: #{old} → #{new_rank} (+{delta})")
         return
 
     # Ensure "Rank Change" header exists in column 11
@@ -279,20 +311,28 @@ def run_daily(spreadsheet, dry_run=False):
     ws.append_rows(rows, value_input_option="USER_ENTERED")
     print(f"  Appended {len(rows)} rows to '{HISTORY_SHEET}'.")
 
+    # Overwrite live snapshot tab with current Top 100 + Tier column
+    ws_snap = get_or_create_worksheet(spreadsheet, SNAPSHOT_SHEET, rows=105, cols=12)
+    ws_snap.resize(rows=105, cols=12)
+    snap_rows = [[
+        row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10],
+        classify_game(row[6], row[5], row[4]),
+        today,
+    ] for row in rows]
+    ws_snap.clear()
+    ws_snap.append_row(
+        ["Rank", "Game Name", "AppID", "Developer", "Publisher", "Genre",
+         "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change", "Tier", "Date Updated"],
+        value_input_option="USER_ENTERED",
+    )
+    ws_snap.append_rows(snap_rows, value_input_option="USER_ENTERED")
+    print(f"  Updated '{SNAPSHOT_SHEET}' snapshot tab ({len(snap_rows)} rows).")
+
     # Send Seatalk movers alert if there are significant movers
     if new_entries or big_climbers:
-        mover_lines = [f"🚀 **Steam Wishlist Movers — {today}**", ""]
-        if new_entries:
-            mover_lines.append("🆕 **New to Top 100:**")
-            for name, rank in new_entries:
-                mover_lines.append(f"• {name} (entered at #{rank})")
-        if big_climbers:
-            if new_entries:
-                mover_lines.append("")
-            mover_lines.append("⬆️ **Big Climbers (20+ positions):**")
-            for name, old, new_rank, delta in big_climbers:
-                mover_lines.append(f"• {name}: #{old} → #{new_rank} (+{delta})")
-        send_to_seatalk(config, "\n".join(mover_lines))
+        personal_mode = config["seatalk"].get("seatalk_mode", "group") == "personal"
+        send_to_seatalk(config, _build_movers_message(today, new_entries, big_climbers),
+                        personal=personal_mode)
 
 # ── Mode: WEEKLY ──────────────────────────────────────────────────────────────
 
@@ -625,17 +665,59 @@ def format_seatalk_message(week_start, week_end, week_num, analysis, ai_commenta
     return "\n".join(lines)
 
 
-def send_to_seatalk(config, message, dry_run=False):
-    """POST the formatted message to Pawon webhook, which routes to Seatalk."""
-    webhook_url = config["seatalk"].get("pawon_webhook_url", "")
-    group_id    = config["seatalk"].get("seatalk_group_id", "")
+def _build_movers_message(today, new_entries, big_climbers):
+    """Build tier-grouped movers Seatalk message."""
+    lines = [f"🚀 **Steam Wishlist Movers — {today}**", ""]
+    if new_entries:
+        lines.append("🆕 **New to Top 100:**")
+        by_tier = {}
+        for name, rank, tier in new_entries:
+            by_tier.setdefault(tier, []).append((name, rank))
+        for tier in ["Indie", "AA", "Triple A", "Early Access"]:
+            if tier not in by_tier:
+                continue
+            lines.append(f"\n{TIER_EMOJI[tier]} **{tier}:**")
+            for name, rank in by_tier[tier]:
+                lines.append(f"• {name} (entered at #{rank})")
+    if big_climbers:
+        if new_entries:
+            lines.append("")
+        lines.append("⬆️ **Big Climbers (20+ positions):**")
+        by_tier = {}
+        for name, old, new_rank, delta, tier in big_climbers:
+            by_tier.setdefault(tier, []).append((name, old, new_rank, delta))
+        for tier in ["Indie", "AA", "Triple A", "Early Access"]:
+            if tier not in by_tier:
+                continue
+            lines.append(f"\n{TIER_EMOJI[tier]} **{tier}:**")
+            for name, old, new_rank, delta in by_tier[tier]:
+                lines.append(f"• {name}: #{old} → #{new_rank} (+{delta})")
+    return "\n".join(lines)
 
-    if not webhook_url or webhook_url.startswith("FILL_IN"):
-        print("  [Seatalk] pawon_webhook_url not configured in watch_config.json — skipping send.")
-        return False
+
+def send_to_seatalk(config, message, dry_run=False, personal=False):
+    """POST the formatted message to Pawon webhook, which routes to Seatalk.
+    If personal=True, routes to DM webhook using employee_code instead of group_id.
+    """
+    if personal:
+        webhook_url   = config["seatalk"].get("pawon_dm_webhook_url", "")
+        employee_code = config["seatalk"].get("seatalk_employee_code", "")
+        if not webhook_url or not employee_code:
+            print("  [Seatalk] pawon_dm_webhook_url or seatalk_employee_code not configured — skipping DM.")
+            return False
+        payload = {"message": message, "employee_code": employee_code}
+        target_label = f"personal DM ({employee_code})"
+    else:
+        webhook_url = config["seatalk"].get("pawon_webhook_url", "")
+        group_id    = config["seatalk"].get("seatalk_group_id", "")
+        if not webhook_url or webhook_url.startswith("FILL_IN"):
+            print("  [Seatalk] pawon_webhook_url not configured in watch_config.json — skipping send.")
+            return False
+        payload = {"message": message, "group_id": group_id}
+        target_label = "group chat"
 
     if dry_run:
-        print("\n  [DRY RUN] Would POST to Pawon webhook:")
+        print(f"\n  [DRY RUN] Would POST to Pawon webhook ({target_label}):")
         print(f"    URL: {webhook_url}")
         print(f"    Payload preview:\n{message[:400]}...")
         return True
@@ -644,14 +726,10 @@ def send_to_seatalk(config, message, dry_run=False):
         "Authorization": f"Bearer {config['seatalk']['pawon_api_key']}",
         "Content-Type":  "application/json",
     }
-    payload = {
-        "message":  message,
-        "group_id": group_id,
-    }
     try:
         resp = requests.post(webhook_url, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
-        print(f"  Seatalk message sent. Status: {resp.status_code}")
+        print(f"  Seatalk message sent to {target_label}. Status: {resp.status_code}")
         return True
     except Exception as e:
         print(f"  [Seatalk] Send error: {e}")

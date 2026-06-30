@@ -81,7 +81,8 @@ python scripts\steam_wishlist_tracker.py --mode weekly --dry-run
 
 | Tab | Purpose |
 |---|---|
-| **Wishlist History** | Raw daily snapshots — one row per game per day |
+| **Wishlist** | Live snapshot — current Top 100 with Tier column (Indie/AA/Triple A/Early Access), overwritten daily |
+| **Wishlist History** | Raw daily log — one row per game per day (100 rows appended each run) |
 | **Weekly Wishlist Summary** | One row per week with AI trend commentary |
 
 **Wishlist History columns:**
