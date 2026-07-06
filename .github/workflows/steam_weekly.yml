@@ -1,9 +1,9 @@
 name: Steam Weekly Report
-# Runs every Monday at 09:00 WIB on GitHub's servers — laptop does not need to be on
+# Runs every Monday at 11:00 WIB on GitHub's servers — laptop does not need to be on
 
 on:
   schedule:
-    - cron: '0 2 * * 1'   # 02:00 UTC Monday = 09:00 WIB Monday
+    - cron: '0 4 * * 1'   # 04:00 UTC Monday = 11:00 WIB Monday
   workflow_dispatch:        # allow manual run from GitHub UI
 
 jobs:
