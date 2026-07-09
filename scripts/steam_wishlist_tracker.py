@@ -52,6 +52,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndieGameResearch/1.0)"}
 
 TOP_N = 100  # fetched via two paginated requests (start=0 and start=50, count=50 each)
 
+VELOCITY_SHEET         = "Wishlist Velocity Tracker"
+HIGH_VELOCITY_THRESHOLD = 15  # rank positions climbed in 7 days to trigger alert/section
+
 AAA_PUBLISHERS = {
     "ubisoft", "electronic arts", "ea games", "capcom", "activision", "blizzard",
     "take-two", "rockstar games", "2k games", "square enix", "sega",
@@ -62,6 +65,12 @@ AAA_PUBLISHERS = {
 }
 
 TIER_EMOJI = {"Indie": "🎮", "Triple A": "🏢", "AA": "🔷", "Early Access": "🧪"}
+
+# Steam hardware/products that appear on the wishlist chart but are not games
+EXCLUDED_NAMES = {
+    "Steam Frame",
+    "Steam Machine",
+}
 
 def classify_game(genre, publisher, developer):
     """Return 'Triple A', 'Indie', 'Early Access', or 'AA' (mid-tier)."""
@@ -207,18 +216,15 @@ def run_daily(spreadsheet, dry_run=False):
     today = datetime.now().strftime("%Y-%m-%d")
     config = load_config()
 
-    ws = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=50000, cols=11)
-    # Ensure the sheet has enough columns/rows (in case it existed before the Top 100 expansion)
-    ws.resize(rows=50000, cols=11)
+    ws = get_or_create_worksheet(spreadsheet, HISTORY_SHEET, rows=50000, cols=12)
+    ws.resize(rows=50000, cols=12)
 
-    # Read existing sheet data: used for duplicate guard + yesterday's rank comparison
+    # Read existing sheet data: used for duplicate guard + prior rank/velocity comparison
+    existing = ws.get_all_values()
     if not dry_run:
-        existing = ws.get_all_values()
         if any(row and row[0] == today for row in existing[1:]):
             print(f"  Already captured data for {today}. Skipping duplicate run.")
             return
-    else:
-        existing = []
 
     # Build dict of yesterday's ranks {game_name: rank} from the most recent prior date
     prior_ranks = {}
@@ -233,15 +239,47 @@ def run_daily(spreadsheet, dry_run=False):
                     except (ValueError, IndexError):
                         pass
 
+    # Build 7-day-ago ranks for rank-based velocity calculation
+    prior_ranks_7d = {}
+    if len(existing) > 1:
+        target_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        dates_available = sorted(set(r[0] for r in existing[1:] if r and r[0] and r[0] != today))
+        best_date = None
+        for d in dates_available:
+            try:
+                diff = abs((datetime.strptime(d, "%Y-%m-%d") - datetime.strptime(target_date, "%Y-%m-%d")).days)
+                if diff <= 2:
+                    if best_date is None:
+                        best_date = d
+                    else:
+                        cur_diff = abs((datetime.strptime(best_date, "%Y-%m-%d") - datetime.strptime(target_date, "%Y-%m-%d")).days)
+                        if diff < cur_diff:
+                            best_date = d
+            except ValueError:
+                pass
+        if best_date:
+            for row in existing[1:]:
+                if row and row[0] == best_date and len(row) >= 3:
+                    try:
+                        prior_ranks_7d[row[2]] = int(row[1])
+                    except (ValueError, IndexError):
+                        pass
+            print(f"  Velocity baseline: using {best_date} ({len(prior_ranks_7d)} games)")
+        else:
+            print("  Velocity baseline: no data from ~7 days ago yet — velocity will show 0")
+
     print(f"  Fetching Top {TOP_N} wishlist chart for {today}...")
 
     items = steam_search_wishlist(max_results=TOP_N)
     if not items:
         print("  ERROR: No data returned from Steam. Aborting.")
         return
+    items = [i for i in items if i.get("name", "") not in EXCLUDED_NAMES]
 
-    new_entries  = []   # (name, rank, tier)
-    big_climbers = []   # (name, old_rank, new_rank, delta, tier)
+    new_entries   = []   # (name, rank, tier, developer, publisher, genre, velocity_7d)
+    big_climbers  = []   # (name, old_rank, new_rank, delta, tier, developer, publisher, genre, velocity_7d)
+    high_velocity = []   # (name, rank, tier, developer, publisher, genre, velocity_7d)
+    all_deltas    = []   # (name, old_rank, new_rank, delta, tier, developer, publisher, genre)
     rows = []
 
     for rank, item in enumerate(items, start=1):
@@ -264,75 +302,121 @@ def run_daily(spreadsheet, dry_run=False):
             details.get("developer", "—"),
         )
 
-        # Compute rank change vs yesterday
+        developer        = details.get("developer", "—")
+        publisher        = details.get("publisher", "—")
+        genre            = details.get("genres", "—")
+        current_wishlists = spy["wishlists"]
+        # Rank-based velocity: positions climbed vs 7 days ago (positive = improved)
+        # Only computed for games that were actually tracked in the 7-day baseline
+        if prior_ranks_7d and name in prior_ranks_7d:
+            velocity_7d = prior_ranks_7d[name] - rank
+        else:
+            velocity_7d = 0
+
         if name not in prior_ranks:
             rank_change = "NEW"
-            new_entries.append((name, rank, tier))
+            new_entries.append((name, rank, tier, developer, publisher, genre, velocity_7d))
         else:
             delta = prior_ranks[name] - rank  # positive = climbed
             rank_change = f"+{delta}" if delta > 0 else str(delta)
-            if delta >= 20:
-                big_climbers.append((name, prior_ranks[name], rank, delta, tier))
+            if delta >= 10:
+                big_climbers.append((name, prior_ranks[name], rank, delta, tier, developer, publisher, genre, velocity_7d))
+            all_deltas.append((name, prior_ranks[name], rank, delta, tier, developer, publisher, genre))
+
+        if velocity_7d >= HIGH_VELOCITY_THRESHOLD:
+            high_velocity.append((name, rank, tier, developer, publisher, genre, velocity_7d))
 
         rows.append([
             today, rank, name, str(appid),
-            details.get("developer", "—"),
-            details.get("publisher", "—"),
-            details.get("genres", "—"),
+            developer, publisher, genre,
             details.get("release_date", item.get("release_date", "—")),
-            spy["wishlists"],
+            current_wishlists,
             spy["owners"],
             rank_change,
+            velocity_7d,
         ])
-        print(f"    #{rank:02d} [{tier[:3]}] {name}  [{rank_change}]")
+        vel_str = f" 🔥+{velocity_7d:,}/7d" if velocity_7d >= HIGH_VELOCITY_THRESHOLD else ""
+        print(f"    #{rank:02d} [{tier[:3]}] {name}  [{rank_change}]{vel_str}")
 
     if dry_run:
         print(f"\n  [DRY RUN] Would append {len(rows)} rows to '{HISTORY_SHEET}'.")
         for r in rows[:3]:
             print(f"    {r}")
-        if new_entries or big_climbers:
-            print(f"\n  [DRY RUN] Significant movers (by tier):")
-            for name, rank, tier in new_entries[:5]:
-                print(f"    {TIER_EMOJI.get(tier,'?')} NEW [{tier}]: {name} (#{rank})")
-            for name, old, new_rank, delta, tier in big_climbers:
-                print(f"    {TIER_EMOJI.get(tier,'?')} CLIMBER [{tier}]: {name}: #{old} → #{new_rank} (+{delta})")
+        today_names_dry = {row[2] for row in rows}
+        exits_dry = sorted([n for n in prior_ranks if n not in today_names_dry], key=lambda n: prior_ranks[n])
+        top_cl_dry = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:5]
+        top_fa_dry = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:5]
+        digest_dry = _build_daily_digest(today, top_cl_dry, top_fa_dry, new_entries, exits_dry, prior_exists=bool(prior_ranks))
+        print(f"\n  [DRY RUN] Daily digest (would send to personal DM):\n")
+        print(digest_dry)
         return
 
-    # Ensure "Rank Change" header exists in column 11
+    # Ensure headers exist / are up to date
     if not existing:
         ws.append_row(
             ["Date", "Rank", "Game Name", "AppID", "Developer", "Publisher",
-             "Genre", "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change"],
+             "Genre", "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change", "7d Rank Δ"],
             value_input_option="USER_ENTERED",
         )
-    elif len(existing[0]) < 11 or existing[0][10] != "Rank Change":
-        ws.update_cell(1, 11, "Rank Change")
+    else:
+        if len(existing[0]) < 11 or existing[0][10] != "Rank Change":
+            ws.update_cell(1, 11, "Rank Change")
+        if len(existing[0]) < 12:
+            ws.update_cell(1, 12, "7d Rank Δ")
 
     ws.append_rows(rows, value_input_option="USER_ENTERED")
     print(f"  Appended {len(rows)} rows to '{HISTORY_SHEET}'.")
 
-    # Overwrite live snapshot tab with current Top 100 + Tier column
-    ws_snap = get_or_create_worksheet(spreadsheet, SNAPSHOT_SHEET, rows=105, cols=12)
-    ws_snap.resize(rows=105, cols=12)
+    # Overwrite live snapshot tab with current Top 100 + Tier + Velocity columns
+    ws_snap = get_or_create_worksheet(spreadsheet, SNAPSHOT_SHEET, rows=105, cols=13)
+    ws_snap.resize(rows=105, cols=13)
     snap_rows = [[
         row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10],
         classify_game(row[6], row[5], row[4]),
+        row[11],  # velocity_7d
         today,
     ] for row in rows]
     ws_snap.clear()
     ws_snap.append_row(
         ["Rank", "Game Name", "AppID", "Developer", "Publisher", "Genre",
-         "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change", "Tier", "Date Updated"],
+         "Release Date", "Wishlist Est.", "Owners Est.", "Rank Change", "Tier",
+         "7d Rank Δ", "Date Updated"],
         value_input_option="USER_ENTERED",
     )
     ws_snap.append_rows(snap_rows, value_input_option="USER_ENTERED")
     print(f"  Updated '{SNAPSHOT_SHEET}' snapshot tab ({len(snap_rows)} rows).")
 
-    # Send Seatalk movers alert if there are significant movers
-    if new_entries or big_climbers:
-        personal_mode = config["seatalk"].get("seatalk_mode", "group") == "personal"
-        send_to_seatalk(config, _build_movers_message(today, new_entries, big_climbers),
-                        personal=personal_mode)
+    # Overwrite Velocity Tracker sheet: games with positive 7d rank improvement, sorted descending
+    vel_tracker_rows = sorted(
+        [
+            [row[1], row[2], row[3], row[4], row[5], row[6],
+             classify_game(row[6], row[5], row[4]), row[8], row[11]]
+            for row in rows
+            if isinstance(row[11], (int, float)) and row[11] > 0
+        ],
+        key=lambda r: r[8],  # r[8] = velocity_7d (rank positions climbed)
+        reverse=True,
+    )
+    ws_vel = get_or_create_worksheet(spreadsheet, VELOCITY_SHEET, rows=105, cols=9)
+    ws_vel.resize(rows=105, cols=9)
+    ws_vel.clear()
+    ws_vel.append_row(
+        ["Rank", "Game Name", "AppID", "Developer", "Publisher", "Genre",
+         "Tier", "Wishlist Est.", "7d Velocity"],
+        value_input_option="USER_ENTERED",
+    )
+    if vel_tracker_rows:
+        ws_vel.append_rows(vel_tracker_rows, value_input_option="USER_ENTERED")
+    print(f"  Updated '{VELOCITY_SHEET}' tab ({len(vel_tracker_rows)} games with velocity data).")
+
+    # Daily digest — always sent to personal DM
+    today_names = {row[2] for row in rows}
+    exits = sorted([n for n in prior_ranks if n not in today_names], key=lambda n: prior_ranks[n])
+    top_climbers_digest = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:5]
+    top_fallers_digest  = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:5]
+    digest = _build_daily_digest(today, top_climbers_digest, top_fallers_digest, new_entries, exits, prior_exists=bool(prior_ranks))
+    send_to_seatalk(config, digest, personal=True)
+    send_to_seatalk(config, digest, personal=False)
 
 # ── Mode: WEEKLY ──────────────────────────────────────────────────────────────
 
@@ -393,7 +477,7 @@ def analyse_week(rows, prior_rows):
         rank  = row.get("Rank")
         date  = row.get("Date", "")
         owners = row.get("SteamSpy Owners Est.", "—")
-        if not name or rank is None:
+        if not name or rank is None or name in EXCLUDED_NAMES:
             continue
         rank_by_name[name].append(int(rank))
         if date and (latest_date is None or date > latest_date):
@@ -421,7 +505,8 @@ def analyse_week(rows, prior_rows):
     prior_names = {row.get("Game Name", "") for row in prior_rows if row.get("Game Name")}
     this_names  = set(rank_by_name.keys())
 
-    new_entrants = [n for n in this_names if n not in prior_names]
+    new_entrants = sorted([n for n in this_names if n not in prior_names],
+                          key=lambda n: final_ranks.get(n, 999))
     exits        = [n for n in prior_names if n not in this_names]
 
     genre_distribution = compute_genre_distribution(rows)
@@ -438,6 +523,45 @@ def analyse_week(rows, prior_rows):
             genre_by_name[name]     = row.get("Genre", "—") or "—"
             publisher_by_name[name] = row.get("Publisher", "—") or "—"
 
+    # Rank movers: compare first day rank vs last day rank within the week
+    first_ranks = {}
+    earliest_date = None
+    for row in rows:
+        date = row.get("Date", "")
+        if date and (earliest_date is None or date < earliest_date):
+            earliest_date = date
+    for row in rows:
+        if row.get("Date") == earliest_date:
+            name = row.get("Game Name", "")
+            try:
+                first_ranks[name] = int(row.get("Rank", 0))
+            except (ValueError, TypeError):
+                pass
+
+    # weekly_rank_delta: positive = improved (climbed), negative = fell
+    weekly_rank_delta = {}
+    for name in rank_by_name:
+        if name in first_ranks and name in final_ranks:
+            weekly_rank_delta[name] = first_ranks[name] - final_ranks[name]
+
+    # Top climbers and fallers this week (min 3 days in chart)
+    movers = [(name, delta) for name, delta in weekly_rank_delta.items()
+              if days_in_chart.get(name, 0) >= 3]
+    top_climbers = sorted(movers, key=lambda x: x[1], reverse=True)[:10]
+    top_fallers  = sorted(movers, key=lambda x: x[1])[:5]
+
+    # Tier classification per game
+    tier_by_name = {}
+    developer_by_name = {}
+    for row in rows:
+        name = row.get("Game Name", "")
+        if name and name not in tier_by_name:
+            genre     = row.get("Genre", "—") or "—"
+            publisher = row.get("Publisher", "—") or "—"
+            developer = row.get("Developer", "—") or "—"
+            tier_by_name[name]      = classify_game(genre, publisher, developer)
+            developer_by_name[name] = developer
+
     return {
         "top5_stable":        top5_stable,
         "top10_stable":       top10_stable,
@@ -453,6 +577,11 @@ def analyse_week(rows, prior_rows):
         "appid_by_name":      appid_by_name,
         "genre_by_name":      genre_by_name,
         "publisher_by_name":  publisher_by_name,
+        "developer_by_name":  developer_by_name,
+        "tier_by_name":       tier_by_name,
+        "weekly_rank_delta":  weekly_rank_delta,
+        "top_climbers":       top_climbers,
+        "top_fallers":        top_fallers,
     }
 
 
@@ -497,18 +626,37 @@ def build_ai_prompt(week_start, week_end, analysis, prior_summaries, game_news=N
     """Build the prompt for the Compass Claude API."""
     week_label = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
 
+    tier_by_name = analysis.get("tier_by_name", {})
+
+    def tier_tag(name):
+        t = tier_by_name.get(name, "AA")
+        return "🎮 Indie" if t == "Indie" else ("🧪 EA" if t == "Early Access" else t)
+
     top5_lines = []
     for name in analysis["top5_stable"][:5]:
-        days    = analysis["days_in_chart"].get(name, 0)
-        owners  = analysis["end_of_week_owners"].get(name, "—")
-        ranks   = analysis["rank_by_name"].get(name, [])
+        days     = analysis["days_in_chart"].get(name, 0)
+        ranks    = analysis["rank_by_name"].get(name, [])
         avg_rank = f"{sum(ranks)/len(ranks):.1f}" if ranks else "?"
-        top5_lines.append(f"  - {name}: {days}/7 days in Top 5, avg rank {avg_rank}, owners est. {owners}")
+        delta    = analysis.get("weekly_rank_delta", {}).get(name, 0)
+        delta_str = f"+{delta}" if delta > 0 else str(delta)
+        top5_lines.append(
+            f"  - {name} [{tier_tag(name)}]: {days}/7 days in Top 5, avg rank {avg_rank}, week Δ {delta_str}"
+        )
 
     top10_others = [n for n in analysis["top10_stable"] if n not in analysis["top5_stable"]]
-    top10_lines  = [f"  - {n}" for n in top10_others[:5]]
+    top10_lines  = [f"  - {n} [{tier_tag(n)}]" for n in top10_others[:5]]
 
-    new_lines  = [f"  - {n}" for n in analysis["new_entrants"][:5]]
+    # Rank movers block
+    climber_lines = []
+    for name, delta in analysis.get("top_climbers", []):
+        if delta > 0:
+            climber_lines.append(f"  - {name} [{tier_tag(name)}]: +{delta} positions")
+    faller_lines = []
+    for name, delta in analysis.get("top_fallers", []):
+        if delta < 0:
+            faller_lines.append(f"  - {name} [{tier_tag(name)}]: {delta} positions")
+
+    new_lines  = [f"  - {n} [{tier_tag(n)}]" for n in analysis["new_entrants"][:8]]
     exit_lines = [f"  - {n}" for n in analysis["exits"][:5]]
 
     # Genre distribution block
@@ -522,14 +670,15 @@ def build_ai_prompt(week_start, week_end, analysis, prior_summaries, game_news=N
     else:
         genre_block = ""
 
-    # Per-game news context block
+    # Per-game news context — focus on top climbers + top 5 stable
+    news_targets = [n for n, _ in analysis.get("top_climbers", [])[:5]] + \
+                   [n for n in analysis["top5_stable"][:3] if n not in [x for x, _ in analysis.get("top_climbers", [])[:5]]]
     news_block = ""
     if game_news:
         sections = []
-        for name in analysis["top5_stable"][:5]:
+        for name in news_targets[:8]:
             items = game_news.get(name, [])
             if not items:
-                sections.append(f"  [{name}]: no recent news found")
                 continue
             snippets = [
                 f'    • [{it.get("feedname", "")}] "{it.get("title", "")}" ({it.get("url", "")}) — {it.get("contents", "")[:300]}'
@@ -537,7 +686,7 @@ def build_ai_prompt(week_start, week_end, analysis, prior_summaries, game_news=N
             ]
             sections.append(f"  [{name}]:\n" + "\n".join(snippets))
         if sections:
-            news_block = "Recent news for Top 5 games (Steam News API):\n" + "\n".join(sections) + "\n"
+            news_block = "Recent news for top movers + stable top 5 (Steam News API):\n" + "\n".join(sections) + "\n"
 
     prior_context = ""
     if prior_summaries:
@@ -562,172 +711,258 @@ def build_ai_prompt(week_start, week_end, analysis, prior_summaries, game_news=N
             )
         prior_context += "\n"
 
-    prompt = f"""You are a game market analyst. Analyse the Steam Wishlist chart data for the week of {week_label} and write a concise, insightful trend commentary for an indie game research team.
+    prompt = f"""You are a game market analyst writing a weekly Steam Wishlist chart briefing for an indie game research team.
 
-Focus on:
-- For EACH of the top 5 games: explain WHY it is popular this week, drawing on the news snippets provided — cite specific announcements, upcoming features, or community events where available
-- What genres or game types dominated the chart this week (use the genre frequency data provided)
-- Significant new entrants or exits and what they might signal
-- How this week's chart compares to prior weeks (look for evolving patterns)
-- Any notable developer or publisher trends
+Write 5–8 bullet points covering these areas in order:
+1. vs last week: how rank movements compare — what's new, what reversed, is indie momentum building or cooling?
+2. Notable rank climbers — WHY did they rise? Draw from news snippets. Label 🎮 Indie / 🧪 Early Access games explicitly.
+3. Notable rank fallers — any pattern or cause?
+4. New entrants and exits — what do they signal about player interest?
+5. Biggest indie/EA signal of the week — any indie punching above its weight or a genre trend emerging?
+
+Rules:
+- Every insight that draws on news MUST cite the source as [Source Name](url)
+- Max 20 words per bullet (not counting URLs)
+- Use • as bullet character
+- First bullet MUST start with "vs last week:"
 
 **This week's data ({week_label}):**
 
-Top 5 stable games (in Top 5 on 5+ of 7 days):
-{chr(10).join(top5_lines) if top5_lines else "  (insufficient daily data)"}
+Top rank climbers (Mon→Sun improvement):
+{chr(10).join(climber_lines) if climber_lines else "  (chart stable — insufficient movement data)"}
 
-Other Top 10 stable games:
-{chr(10).join(top10_lines) if top10_lines else "  none"}
+Top rank fallers:
+{chr(10).join(faller_lines) if faller_lines else "  none"}
 
-New entrants this week (not in prior week's Top 15):
-{chr(10).join(new_lines) if new_lines else "  none"}
+New entrants to Top 100:
+{chr(10).join(new_lines) if new_lines else "  none (or prior-week data insufficient for comparison)"}
 
-Games that dropped out of Top 15:
+Games that dropped out of Top 100:
 {chr(10).join(exit_lines) if exit_lines else "  none"}
 
 {genre_block}
 {news_block}
-{prior_context}Write 5–8 bullet points using • as the bullet character. Follow this structure exactly:
-• First bullet MUST start with "vs last week:" — compare directly to last week's trend analysis above. Call out what stayed the same, what shifted (rank changes, new entries, exits), and whether the trend is continuing or reversing.
-• Remaining bullets: one insight per bullet about WHY a game is rising/falling or WHY a genre is dominating — draw from the news snippets provided. Every news citation MUST include the URL formatted as [Source Name](url).
-• Max 20 words per bullet (not counting the URL)."""
+{prior_context}"""
 
     return prompt
 
 
 def format_seatalk_message(week_start, week_end, week_num, analysis, ai_commentary):
     """Build the Markdown message for Seatalk (format=1)."""
-    week_label = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
+    week_label  = f"{week_start.strftime('%b %d')}–{week_end.strftime('%b %d, %Y')}"
+    tier_by     = analysis.get("tier_by_name", {})
+    final_ranks = analysis.get("final_ranks", {})
 
-    lines = [
-        f"📊 **Steam Wishlist Chart — Week {week_num} ({week_label})**",
-        "",
-        "**🏆 Top 5 (stable — appeared in Top 5 on 5+ days)**",
-    ]
+    def fmt_tier(name):
+        t = tier_by.get(name, "AA")
+        return TIER_EMOJI.get(t, "🔷")
 
-    def is_indie(name):
-        genre_str = analysis.get("genre_by_name", {}).get(name, "")
-        return "Indie" in genre_str.split(", ")
+    lines = [f"📊 **Steam Wishlist Chart — Week {week_num} ({week_label})**", ""]
 
-    top5 = analysis["top5_stable"][:5]
-    if top5:
-        for i, name in enumerate(top5, start=1):
-            days_top5 = sum(1 for r in analysis["rank_by_name"].get(name, []) if r <= 5)
-            genre     = analysis.get("genre_by_name", {}).get(name, "—")
-            publisher = analysis.get("publisher_by_name", {}).get(name, "—")
-            lines.append(f"{i}. **{name}** | {genre} | {publisher} | {days_top5}/7 days in Top 5")
-        indie_count5 = sum(1 for n in top5 if is_indie(n))
-        aaa_count5   = len(top5) - indie_count5
-        lines.append(f"_Indie: {indie_count5} | AAA/Non-Indie: {aaa_count5}_")
-    else:
-        lines.append("_(insufficient daily data captured this week)_")
+    # (1) Biggest rank movers
+    lines.append("**📈 Biggest Rank Movers This Week**")
+    climbers = [(n, d) for n, d in analysis.get("top_climbers", []) if d > 0]
+    fallers  = [(n, d) for n, d in analysis.get("top_fallers", []) if d < 0]
+    if climbers:
+        lines.append("↑ *Climbers:*")
+        for name, delta in climbers[:8]:
+            rank = final_ranks.get(name, "?")
+            lines.append(f"  {fmt_tier(name)} **{name}** (now #{rank}, +{delta})")
+    if fallers:
+        lines.append("↓ *Fallers:*")
+        for name, delta in fallers[:5]:
+            rank = final_ranks.get(name, "?")
+            lines.append(f"  {fmt_tier(name)} **{name}** (now #{rank}, {delta})")
+    if not climbers and not fallers:
+        lines.append("  _(chart was stable this week)_")
 
-    lines += ["", "**📈 Top 10 Roundup**"]
-    top10_others = [n for n in analysis["top10_stable"] if n not in analysis["top5_stable"]][:5]
-    if top10_others:
-        for i, name in enumerate(top10_others, start=len(top5) + 1):
-            days_top10 = sum(1 for r in analysis["rank_by_name"].get(name, []) if r <= 10)
-            genre      = analysis.get("genre_by_name", {}).get(name, "—")
-            publisher  = analysis.get("publisher_by_name", {}).get(name, "—")
-            lines.append(f"{i}. **{name}** | {genre} | {publisher} | {days_top10}/7 days in Top 10")
-        all_top10 = analysis["top10_stable"][:10]
-        indie_count10 = sum(1 for n in all_top10 if is_indie(n))
-        aaa_count10   = len(all_top10) - indie_count10
-        lines.append(f"_Indie: {indie_count10} | AAA/Non-Indie: {aaa_count10} (across full Top 10)_")
-    else:
-        lines.append("_(see Top 5 above)_")
-
-    lines += [""]
+    # (2) New this week
+    lines.append("")
+    lines.append("**🆕 New This Week**")
     if analysis["new_entrants"]:
-        lines.append("**🆕 New This Week**")
-        for name in analysis["new_entrants"][:4]:
-            rank = analysis["final_ranks"].get(name, "?")
-            lines.append(f"• {name} (entered at #{rank})")
+        for name in analysis["new_entrants"][:10]:
+            rank = final_ranks.get(name, "?")
+            lines.append(f"  {fmt_tier(name)} **{name}** (#{rank})")
+    else:
+        lines.append("  _(no new entries — or insufficient prior-week data for comparison)_")
 
+    # (3) Dropped out
+    lines.append("")
+    lines.append("**📉 Dropped Out**")
     if analysis["exits"]:
-        lines.append("**📉 Dropped Out**")
-        for name in analysis["exits"][:4]:
-            lines.append(f"• {name}")
+        for name in analysis["exits"][:8]:
+            lines.append(f"  • {name}")
+    else:
+        lines.append("  _(none)_")
 
+    # (4) Top genres
+    lines.append("")
+    lines.append("**🎲 Top Genres**")
     genre_dist = analysis.get("genre_distribution", [])
     if genre_dist:
-        lines.append("")
-        lines.append("**🎮 Top Genres This Week**")
-        for i, (genre, count) in enumerate(genre_dist, start=1):
-            lines.append(f"{i}. {genre} ({count} chart appearances)")
+        for i, (genre, count) in enumerate(genre_dist[:8], start=1):
+            lines.append(f"  {i}. {genre} ({count} appearances)")
+    else:
+        lines.append("  _(no genre data)_")
 
-    lines += [
-        "",
-        "**🤖 Trend Analysis**",
-        ai_commentary,
-    ]
+    # (5) AI analysis
+    lines += ["", "**🤖 Analysis**", ai_commentary]
 
     return "\n".join(lines)
 
 
-def _build_movers_message(today, new_entries, big_climbers):
-    """Build tier-grouped movers Seatalk message."""
+def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, prior_exists=True):
+    """Daily digest of top movers, new entries, and exits. Always sent to personal DM."""
+    lines = [f"📊 **Steam Wishlist Daily — {today}**", ""]
+
+    if not prior_exists:
+        lines.append("_(First day of tracking — no prior data to compare)_")
+        return "\n".join(lines)
+
+    if top_climbers:
+        lines.append("📈 **Top Climbers**")
+        for name, old_rank, new_rank, delta, tier, developer, publisher, genre in top_climbers:
+            lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name}: #{old_rank} → #{new_rank} (+{delta})")
+        lines.append("")
+
+    if top_fallers:
+        lines.append("📉 **Top Fallers**")
+        for name, old_rank, new_rank, delta, tier, developer, publisher, genre in top_fallers:
+            lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name}: #{old_rank} → #{new_rank} ({delta})")
+        lines.append("")
+
+    if new_entries:
+        lines.append("🆕 **New to Top 100**")
+        for name, rank, tier, developer, publisher, genre, velocity_7d in new_entries:
+            lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name} (#{rank})")
+        lines.append("")
+
+    if exits:
+        lines.append("📤 **Dropped Out**")
+        for name in exits[:5]:
+            lines.append(f"  • {name}")
+        lines.append("")
+
+    if not top_climbers and not top_fallers and not new_entries and not exits:
+        lines.append("_(No rank changes today)_")
+
+    return "\n".join(lines).rstrip()
+
+
+def _build_movers_message(today, new_entries, big_climbers, high_velocity=None):
+    """Build tier-grouped movers Seatalk message with optional velocity section."""
+    high_velocity = high_velocity or []
+    # Names already shown in new_entries/big_climbers — skip from high_velocity section
+    already_shown = {e[0] for e in new_entries} | {e[0] for e in big_climbers}
+
     lines = [f"🚀 **Steam Wishlist Movers — {today}**", ""]
     if new_entries:
         lines.append("🆕 **New to Top 100:**")
         by_tier = {}
-        for name, rank, tier in new_entries:
-            by_tier.setdefault(tier, []).append((name, rank))
+        for name, rank, tier, developer, publisher, genre, velocity_7d in new_entries:
+            by_tier.setdefault(tier, []).append((name, rank, developer, publisher, genre, velocity_7d))
         for tier in ["Indie", "AA", "Triple A", "Early Access"]:
             if tier not in by_tier:
                 continue
             lines.append(f"\n{TIER_EMOJI[tier]} **{tier}:**")
-            for name, rank in by_tier[tier]:
-                lines.append(f"• {name} (entered at #{rank})")
+            for name, rank, developer, publisher, genre, velocity_7d in by_tier[tier]:
+                meta = f"{developer}" if developer == publisher or publisher == "—" else f"{developer} / {publisher}"
+                vel = f" | 🔥 +{velocity_7d} ranks/7d" if velocity_7d >= HIGH_VELOCITY_THRESHOLD else ""
+                lines.append(f"• **{name}** (#{rank}) — {meta} | {genre}{vel}")
     if big_climbers:
         if new_entries:
             lines.append("")
-        lines.append("⬆️ **Big Climbers (20+ positions):**")
+        lines.append("⬆️ **Big Climbers (10+ positions):**")
         by_tier = {}
-        for name, old, new_rank, delta, tier in big_climbers:
-            by_tier.setdefault(tier, []).append((name, old, new_rank, delta))
+        for name, old, new_rank, delta, tier, developer, publisher, genre, velocity_7d in big_climbers:
+            by_tier.setdefault(tier, []).append((name, old, new_rank, delta, developer, publisher, genre, velocity_7d))
         for tier in ["Indie", "AA", "Triple A", "Early Access"]:
             if tier not in by_tier:
                 continue
             lines.append(f"\n{TIER_EMOJI[tier]} **{tier}:**")
-            for name, old, new_rank, delta in by_tier[tier]:
-                lines.append(f"• {name}: #{old} → #{new_rank} (+{delta})")
+            for name, old, new_rank, delta, developer, publisher, genre, velocity_7d in by_tier[tier]:
+                meta = f"{developer}" if developer == publisher or publisher == "—" else f"{developer} / {publisher}"
+                vel = f" | 🔥 +{velocity_7d} ranks/7d" if velocity_7d >= HIGH_VELOCITY_THRESHOLD else ""
+                lines.append(f"• **{name}**: #{old} → #{new_rank} (+{delta}) — {meta} | {genre}{vel}")
+    # High-velocity section: games not already listed above
+    extra_vel = [(n, r, t, dev, pub, g, v) for n, r, t, dev, pub, g, v in high_velocity if n not in already_shown]
+    if extra_vel:
+        if new_entries or big_climbers:
+            lines.append("")
+        lines.append("🔥 **Trending (15+ rank climb in 7 days):**")
+        by_tier = {}
+        for name, rank, tier, developer, publisher, genre, velocity_7d in extra_vel:
+            by_tier.setdefault(tier, []).append((name, rank, developer, publisher, genre, velocity_7d))
+        for tier in ["Indie", "AA", "Triple A", "Early Access"]:
+            if tier not in by_tier:
+                continue
+            lines.append(f"\n{TIER_EMOJI[tier]} **{tier}:**")
+            for name, rank, developer, publisher, genre, velocity_7d in by_tier[tier]:
+                meta = f"{developer}" if developer == publisher or publisher == "—" else f"{developer} / {publisher}"
+                lines.append(f"• **{name}** (#{rank}) — climbed +{velocity_7d} ranks this week | {meta}")
     return "\n".join(lines)
 
 
+def _get_seatalk_token(app_id, app_secret):
+    """Exchange app_id + app_secret for a short-lived app_access_token."""
+    resp = requests.post(
+        "https://openapi.seatalk.io/auth/app_access_token",
+        json={"app_id": app_id, "app_secret": app_secret},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise Exception(f"Seatalk auth error {data.get('code')}: {data.get('message', data)}")
+    return data["app_access_token"]
+
+
 def send_to_seatalk(config, message, dry_run=False, personal=False):
-    """POST the formatted message to Pawon webhook, which routes to Seatalk.
-    If personal=True, routes to DM webhook using employee_code instead of group_id.
+    """Send message via Seatalk OpenAPI (app_id + app_secret → token → send).
+    personal=True → single_chat to seatalk_employee_code
+    personal=False → group_chat to seatalk_group_id
     """
+    sc = config["seatalk"]
+    app_id     = sc.get("seatalk_app_id", "")
+    app_secret = sc.get("seatalk_app_secret", "")
+
     if personal:
-        webhook_url   = config["seatalk"].get("pawon_dm_webhook_url", "")
-        employee_code = config["seatalk"].get("seatalk_employee_code", "")
-        if not webhook_url or not employee_code:
-            print("  [Seatalk] pawon_dm_webhook_url or seatalk_employee_code not configured — skipping DM.")
+        employee_code = sc.get("seatalk_employee_code", "")
+        if not employee_code:
+            print("  [Seatalk] seatalk_employee_code not configured — skipping DM.")
             return False
-        payload = {"message": message, "employee_code": employee_code}
+        url          = "https://openapi.seatalk.io/messaging/v2/single_chat"
+        payload      = {"employee_code": employee_code,
+                        "message": {"tag": "text", "text": {"format": 1, "content": message}}}
         target_label = f"personal DM ({employee_code})"
     else:
-        webhook_url = config["seatalk"].get("pawon_webhook_url", "")
-        group_id    = config["seatalk"].get("seatalk_group_id", "")
-        if not webhook_url or webhook_url.startswith("FILL_IN"):
-            print("  [Seatalk] pawon_webhook_url not configured in watch_config.json — skipping send.")
+        group_id = sc.get("seatalk_group_id", "")
+        if not group_id:
+            print("  [Seatalk] seatalk_group_id not configured — skipping group send.")
             return False
-        payload = {"message": message, "group_id": group_id}
+        url          = "https://openapi.seatalk.io/messaging/v2/group_chat"
+        payload      = {"group_id": group_id,
+                        "message": {"tag": "text", "text": {"format": 1, "content": message}}}
         target_label = "group chat"
 
     if dry_run:
-        print(f"\n  [DRY RUN] Would POST to Pawon webhook ({target_label}):")
-        print(f"    URL: {webhook_url}")
+        print(f"\n  [DRY RUN] Would send to Seatalk {target_label}:")
         print(f"    Payload preview:\n{message[:400]}...")
         return True
 
-    headers = {
-        "Authorization": f"Bearer {config['seatalk']['pawon_api_key']}",
-        "Content-Type":  "application/json",
-    }
+    if not app_id or not app_secret:
+        print("  [Seatalk] seatalk_app_id or seatalk_app_secret not configured — skipping send.")
+        return False
+
     try:
-        resp = requests.post(webhook_url, headers=headers, json=payload, timeout=15)
+        token = _get_seatalk_token(app_id, app_secret)
+    except Exception as e:
+        print(f"  [Seatalk] Auth failed: {e}")
+        return False
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
         print(f"  Seatalk message sent to {target_label}. Status: {resp.status_code}")
         return True
@@ -758,12 +993,14 @@ def run_weekly(spreadsheet, dry_run=False):
 
     analysis = analyse_week(week_rows, prior_rows)
 
-    # Fetch news for top 5 games
+    # Fetch news for top climbers + top 5 stable
     game_news = {}
-    top5_for_news = analysis["top5_stable"][:5]
-    if top5_for_news:
-        print(f"  Fetching Steam news for {len(top5_for_news)} top game(s)...")
-        for name in top5_for_news:
+    climber_names = [n for n, _ in analysis.get("top_climbers", [])[:5]]
+    stable_names  = [n for n in analysis["top5_stable"][:3] if n not in climber_names]
+    news_targets  = climber_names + stable_names
+    if news_targets:
+        print(f"  Fetching Steam news for {len(news_targets)} game(s) (top climbers + stable top 5)...")
+        for name in news_targets:
             appid = analysis["appid_by_name"].get(name, "")
             news_items = fetch_game_news(appid, name, count=3)
             game_news[name] = news_items
@@ -822,20 +1059,121 @@ def run_weekly(spreadsheet, dry_run=False):
         summary_ws.append_row(summary_row, value_input_option="USER_ENTERED")
         print(f"  Appended summary row to '{SUMMARY_SHEET}'.")
 
-    # Send to Seatalk
-    send_to_seatalk(config, message, dry_run=dry_run)
+    # Send to Seatalk (personal DM if seatalk_mode=personal or --personal flag used)
+    personal_mode = config["seatalk"].get("seatalk_mode", "group") == "personal"
+    send_to_seatalk(config, message, dry_run=dry_run, personal=personal_mode)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+def resend_movers(spreadsheet, target_date=None, personal=True):
+    """Re-compute and resend the movers alert from already-captured sheet data.
+    Reads today's rows and the most recent prior date's rows — no new API calls, no writes.
+    """
+    today = target_date or datetime.now().strftime("%Y-%m-%d")
+    config = load_config()
+
+    ws = spreadsheet.worksheet(HISTORY_SHEET)
+    existing = ws.get_all_values()
+    if len(existing) < 2:
+        print("  No history data found.")
+        return
+
+    # Gather today's rows (excluding non-games)
+    today_rows = [r for r in existing[1:] if r and r[0] == today and r[2] not in EXCLUDED_NAMES]
+    if not today_rows:
+        print(f"  No rows found for {today} in '{HISTORY_SHEET}'.")
+        return
+
+    # Build prior ranks from the most recent date before today
+    dates_before = sorted(set(r[0] for r in existing[1:] if r and r[0] < today))
+    prior_ranks = {}
+    prior_ranks_7d = {}
+    if dates_before:
+        latest_prior = dates_before[-1]
+        for r in existing[1:]:
+            if r and r[0] == latest_prior and len(r) >= 3:
+                try:
+                    prior_ranks[r[2]] = int(r[1])
+                except (ValueError, IndexError):
+                    pass
+
+        target_7d = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
+        best_date = None
+        for d in dates_before:
+            try:
+                diff = abs((datetime.strptime(d, "%Y-%m-%d") - datetime.strptime(target_7d, "%Y-%m-%d")).days)
+                if diff <= 2:
+                    if best_date is None:
+                        cur_diff = diff + 1
+                    else:
+                        cur_diff = abs((datetime.strptime(best_date, "%Y-%m-%d") - datetime.strptime(target_7d, "%Y-%m-%d")).days)
+                    if diff < cur_diff:
+                        best_date = d
+            except ValueError:
+                pass
+        if best_date:
+            for r in existing[1:]:
+                if r and r[0] == best_date and len(r) >= 3:
+                    try:
+                        prior_ranks_7d[r[2]] = int(r[1])
+                    except (ValueError, IndexError):
+                        pass
+
+    new_entries = []
+    big_climbers = []
+    high_velocity = []
+
+    for row in today_rows:
+        if len(row) < 11:
+            continue
+        try:
+            rank      = int(row[1])
+            name      = row[2]
+            developer = row[4]
+            publisher = row[5]
+            genre     = row[6]
+            tier      = classify_game(genre, publisher, developer)
+        except (ValueError, IndexError):
+            continue
+
+        if name not in prior_ranks:
+            rank_change = "NEW"
+            velocity_7d = 0
+            new_entries.append((name, rank, tier, developer, publisher, genre, velocity_7d))
+        else:
+            delta = prior_ranks[name] - rank
+            rank_change = f"+{delta}" if delta > 0 else str(delta)
+            velocity_7d = prior_ranks_7d[name] - rank if name in prior_ranks_7d else 0
+            if delta >= 10:
+                big_climbers.append((name, prior_ranks[name], rank, delta, tier, developer, publisher, genre, velocity_7d))
+
+        velocity_7d = prior_ranks_7d.get(name, 0) and (prior_ranks_7d[name] - rank)
+        if velocity_7d >= HIGH_VELOCITY_THRESHOLD:
+            high_velocity.append((name, rank, tier, developer, publisher, genre, velocity_7d))
+
+    if not (new_entries or big_climbers or high_velocity):
+        print("  No significant movers today — nothing to send.")
+        return
+
+    msg = _build_movers_message(today, new_entries, big_climbers, high_velocity)
+    print(msg)
+    send_to_seatalk(config, msg, personal=personal)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Steam Wishlist Tracker")
     parser.add_argument(
-        "--mode", choices=["daily", "weekly"], required=True,
-        help="'daily' = capture today's chart; 'weekly' = generate + send report",
+        "--mode", choices=["daily", "weekly", "resend-movers"],
+        required=True,
+        help="'daily' = capture today's chart; 'weekly' = generate + send report; 'resend-movers' = resend today's movers alert from existing data",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Print output without writing to Sheets or sending to Seatalk",
+    )
+    parser.add_argument(
+        "--personal", action="store_true", default=None,
+        help="Force personal DM mode for resend-movers (overrides config)",
     )
     args = parser.parse_args()
 
@@ -848,6 +1186,9 @@ def main():
         run_daily(spreadsheet, dry_run=args.dry_run)
     elif args.mode == "weekly":
         run_weekly(spreadsheet, dry_run=args.dry_run)
+    elif args.mode == "resend-movers":
+        personal = True if args.personal else load_config()["seatalk"].get("seatalk_mode", "group") == "personal"
+        resend_movers(spreadsheet, personal=personal)
 
     print("\nDone.")
 
