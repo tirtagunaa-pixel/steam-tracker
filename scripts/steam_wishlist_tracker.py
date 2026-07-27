@@ -2,7 +2,7 @@
 Steam Wishlist Tracker — Daily capture + Weekly AI report
 ----------------------------------------------------------
 Modes:
-  --mode daily   Fetch today's Top 100 wishlist chart and append to 'Wishlist History' sheet.
+  --mode daily   Fetch today's Top 500 wishlist chart and append to 'Wishlist History' sheet.
                  Flags significant movers (new entries or 20+ rank jump) and sends a Seatalk alert.
                  Run every day at 08:00 via Task Scheduler.
 
@@ -50,7 +50,7 @@ SNAPSHOT_SHEET = "Wishlist"  # live current-state view, overwritten daily
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndieGameResearch/1.0)"}
 
-TOP_N = 100  # fetched via two paginated requests (start=0 and start=50, count=50 each)
+TOP_N = 500  # fetched via 10 paginated requests (start=0,50,...,450, count=50 each)
 
 VELOCITY_SHEET         = "Wishlist Velocity Tracker"
 HIGH_VELOCITY_THRESHOLD = 15  # rank positions climbed in 7 days to trigger alert/section
@@ -130,6 +130,7 @@ def steam_search_wishlist(max_results=100):
             all_items.extend(items)
             if len(items) < count:
                 break  # API returned fewer than requested — no more results
+            time.sleep(0.3)  # polite pause between pages
         except Exception as e:
             print(f"  [Wishlist] API error at start={start}: {e}")
             break
@@ -292,7 +293,7 @@ def run_daily(spreadsheet, dry_run=False):
             time.sleep(0.4)
 
         spy = {"wishlists": 0, "owners": "—"}
-        if appid:
+        if appid and rank <= 100:  # SteamSpy returns 0 for unreleased games above rank 100
             spy = steamspy_data(appid)
             time.sleep(0.5)
 
@@ -344,8 +345,8 @@ def run_daily(spreadsheet, dry_run=False):
             print(f"    {r}")
         today_names_dry = {row[2] for row in rows}
         exits_dry = sorted([n for n in prior_ranks if n not in today_names_dry], key=lambda n: prior_ranks[n])
-        top_cl_dry = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:5]
-        top_fa_dry = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:5]
+        top_cl_dry = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:10]
+        top_fa_dry = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:10]
         digest_dry = _build_daily_digest(today, top_cl_dry, top_fa_dry, new_entries, exits_dry, prior_exists=bool(prior_ranks))
         print(f"\n  [DRY RUN] Daily digest (would send to personal DM):\n")
         print(digest_dry)
@@ -367,9 +368,9 @@ def run_daily(spreadsheet, dry_run=False):
     ws.append_rows(rows, value_input_option="USER_ENTERED")
     print(f"  Appended {len(rows)} rows to '{HISTORY_SHEET}'.")
 
-    # Overwrite live snapshot tab with current Top 100 + Tier + Velocity columns
-    ws_snap = get_or_create_worksheet(spreadsheet, SNAPSHOT_SHEET, rows=105, cols=13)
-    ws_snap.resize(rows=105, cols=13)
+    # Overwrite live snapshot tab with current Top 500 + Tier + Velocity columns
+    ws_snap = get_or_create_worksheet(spreadsheet, SNAPSHOT_SHEET, rows=505, cols=13)
+    ws_snap.resize(rows=505, cols=13)
     snap_rows = [[
         row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8], row[9], row[10],
         classify_game(row[6], row[5], row[4]),
@@ -397,8 +398,8 @@ def run_daily(spreadsheet, dry_run=False):
         key=lambda r: r[8],  # r[8] = velocity_7d (rank positions climbed)
         reverse=True,
     )
-    ws_vel = get_or_create_worksheet(spreadsheet, VELOCITY_SHEET, rows=105, cols=9)
-    ws_vel.resize(rows=105, cols=9)
+    ws_vel = get_or_create_worksheet(spreadsheet, VELOCITY_SHEET, rows=505, cols=9)
+    ws_vel.resize(rows=505, cols=9)
     ws_vel.clear()
     ws_vel.append_row(
         ["Rank", "Game Name", "AppID", "Developer", "Publisher", "Genre",
@@ -412,8 +413,8 @@ def run_daily(spreadsheet, dry_run=False):
     # Daily digest — always sent to personal DM
     today_names = {row[2] for row in rows}
     exits = sorted([n for n in prior_ranks if n not in today_names], key=lambda n: prior_ranks[n])
-    top_climbers_digest = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:5]
-    top_fallers_digest  = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:5]
+    top_climbers_digest = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:10]
+    top_fallers_digest  = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:10]
     digest = _build_daily_digest(today, top_climbers_digest, top_fallers_digest, new_entries, exits, prior_exists=bool(prior_ranks))
     send_to_seatalk(config, digest, personal=True)
     send_to_seatalk(config, digest, personal=False)
@@ -734,10 +735,10 @@ Top rank climbers (Mon→Sun improvement):
 Top rank fallers:
 {chr(10).join(faller_lines) if faller_lines else "  none"}
 
-New entrants to Top 100:
+New entrants to Top 500:
 {chr(10).join(new_lines) if new_lines else "  none (or prior-week data insufficient for comparison)"}
 
-Games that dropped out of Top 100:
+Games that dropped out of Top 500:
 {chr(10).join(exit_lines) if exit_lines else "  none"}
 
 {genre_block}
@@ -832,9 +833,12 @@ def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, pr
         lines.append("")
 
     if new_entries:
-        lines.append("🆕 **New to Top 100**")
-        for name, rank, tier, developer, publisher, genre, velocity_7d in new_entries:
+        cap = 15
+        lines.append("🆕 **New to Top 500**")
+        for name, rank, tier, developer, publisher, genre, velocity_7d in new_entries[:cap]:
             lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name} (#{rank})")
+        if len(new_entries) > cap:
+            lines.append(f"  _(+ {len(new_entries) - cap} more)_")
         lines.append("")
 
     if exits:
@@ -857,7 +861,7 @@ def _build_movers_message(today, new_entries, big_climbers, high_velocity=None):
 
     lines = [f"🚀 **Steam Wishlist Movers — {today}**", ""]
     if new_entries:
-        lines.append("🆕 **New to Top 100:**")
+        lines.append("🆕 **New to Top 500:**")
         by_tier = {}
         for name, rank, tier, developer, publisher, genre, velocity_7d in new_entries:
             by_tier.setdefault(tier, []).append((name, rank, developer, publisher, genre, velocity_7d))
