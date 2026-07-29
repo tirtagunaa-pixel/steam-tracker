@@ -55,6 +55,10 @@ TOP_N = 500  # fetched via 10 paginated requests (start=0,50,...,450, count=50 e
 VELOCITY_SHEET         = "Wishlist Velocity Tracker"
 HIGH_VELOCITY_THRESHOLD = 15  # rank positions climbed in 7 days to trigger alert/section
 
+RISING_STARS_SHEET = "Rising Stars"
+BREAKOUT_THRESHOLD = 30   # min 7d rank climb (positions) for daily breakout alert
+RISING_WEEKLY_MIN  = 15   # min weekly rank climb for weekly Rising Games section
+
 AAA_PUBLISHERS = {
     "ubisoft", "electronic arts", "ea games", "capcom", "activision", "blizzard",
     "take-two", "rockstar games", "2k games", "square enix", "sega",
@@ -347,7 +351,20 @@ def run_daily(spreadsheet, dry_run=False):
         exits_dry = sorted([n for n in prior_ranks if n not in today_names_dry], key=lambda n: prior_ranks[n])
         top_cl_dry = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:10]
         top_fa_dry = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:10]
-        digest_dry = _build_daily_digest(today, top_cl_dry, top_fa_dry, new_entries, exits_dry, prior_exists=bool(prior_ranks))
+        breakout_dry = sorted(
+            [
+                (row[1], row[2], classify_game(row[6], row[5], row[4]),
+                 row[4], row[5], row[6], row[11])
+                for row in rows
+                if int(row[1]) >= 250
+                and classify_game(row[6], row[5], row[4]) != "Triple A"
+                and isinstance(row[11], (int, float))
+                and row[11] >= BREAKOUT_THRESHOLD
+            ],
+            key=lambda x: x[6], reverse=True,
+        )
+        digest_dry = _build_daily_digest(today, top_cl_dry, top_fa_dry, new_entries, exits_dry,
+                                         prior_exists=bool(prior_ranks), breakout=breakout_dry)
         print(f"\n  [DRY RUN] Daily digest (would send to personal DM):\n")
         print(digest_dry)
         return
@@ -410,12 +427,50 @@ def run_daily(spreadsheet, dry_run=False):
         ws_vel.append_rows(vel_tracker_rows, value_input_option="USER_ENTERED")
     print(f"  Updated '{VELOCITY_SHEET}' tab ({len(vel_tracker_rows)} games with velocity data).")
 
+    # Rising Stars sheet: rank 250-500, non-AAA, positive 7d velocity, sorted by velocity desc
+    rising_stars_rows = sorted(
+        [
+            [row[1], row[2], row[3], row[4], row[5], row[6],
+             classify_game(row[6], row[5], row[4]), row[7], row[11]]
+            for row in rows
+            if int(row[1]) >= 250
+            and classify_game(row[6], row[5], row[4]) != "Triple A"
+            and isinstance(row[11], (int, float)) and row[11] > 0
+        ],
+        key=lambda r: r[8],
+        reverse=True,
+    )
+    ws_rising = get_or_create_worksheet(spreadsheet, RISING_STARS_SHEET, rows=505, cols=9)
+    ws_rising.resize(rows=505, cols=9)
+    ws_rising.clear()
+    ws_rising.append_row(
+        ["Rank", "Game Name", "AppID", "Developer", "Publisher",
+         "Genre", "Tier", "Release Date", "7d Rank Climb"],
+        value_input_option="USER_ENTERED",
+    )
+    if rising_stars_rows:
+        ws_rising.append_rows(rising_stars_rows, value_input_option="USER_ENTERED")
+    print(f"  Updated '{RISING_STARS_SHEET}' tab ({len(rising_stars_rows)} rising games).")
+
     # Daily digest — always sent to personal DM
     today_names = {row[2] for row in rows}
     exits = sorted([n for n in prior_ranks if n not in today_names], key=lambda n: prior_ranks[n])
     top_climbers_digest = sorted([d for d in all_deltas if d[3] > 0], key=lambda x: x[3], reverse=True)[:10]
     top_fallers_digest  = sorted([d for d in all_deltas if d[3] < 0], key=lambda x: x[3])[:10]
-    digest = _build_daily_digest(today, top_climbers_digest, top_fallers_digest, new_entries, exits, prior_exists=bool(prior_ranks))
+    breakout_alerts = sorted(
+        [
+            (row[1], row[2], classify_game(row[6], row[5], row[4]),
+             row[4], row[5], row[6], row[11])
+            for row in rows
+            if int(row[1]) >= 250
+            and classify_game(row[6], row[5], row[4]) != "Triple A"
+            and isinstance(row[11], (int, float))
+            and row[11] >= BREAKOUT_THRESHOLD
+        ],
+        key=lambda x: x[6], reverse=True,
+    )
+    digest = _build_daily_digest(today, top_climbers_digest, top_fallers_digest, new_entries, exits,
+                                 prior_exists=bool(prior_ranks), breakout=breakout_alerts)
     send_to_seatalk(config, digest, personal=True)
     send_to_seatalk(config, digest, personal=False)
 
@@ -563,6 +618,20 @@ def analyse_week(rows, prior_rows):
             tier_by_name[name]      = classify_game(genre, publisher, developer)
             developer_by_name[name] = developer
 
+    # Rising games: rank 250-500, non-AAA, meaningful weekly climb, seen ≥3 days
+    rising_games = sorted(
+        [
+            (name, first_ranks[name], final_ranks[name], weekly_rank_delta[name])
+            for name in weekly_rank_delta
+            if final_ranks.get(name, 0) >= 250
+            and tier_by_name.get(name, "AA") != "Triple A"
+            and weekly_rank_delta[name] >= RISING_WEEKLY_MIN
+            and days_in_chart.get(name, 0) >= 3
+            and name in first_ranks
+        ],
+        key=lambda x: x[3], reverse=True,
+    )[:15]
+
     return {
         "top5_stable":        top5_stable,
         "top10_stable":       top10_stable,
@@ -583,6 +652,8 @@ def analyse_week(rows, prior_rows):
         "weekly_rank_delta":  weekly_rank_delta,
         "top_climbers":       top_climbers,
         "top_fallers":        top_fallers,
+        "rising_games":       rising_games,
+        "first_ranks":        first_ranks,
     }
 
 
@@ -777,6 +848,16 @@ def format_seatalk_message(week_start, week_end, week_num, analysis, ai_commenta
     if not climbers and not fallers:
         lines.append("  _(chart was stable this week)_")
 
+    # (1b) Rising Games: rank 250-500, non-AAA, climbing this week
+    lines.append("")
+    lines.append("**🌱 Rising Games (Rank 250-500)**")
+    rising = analysis.get("rising_games", [])
+    if rising:
+        for name, first_rank, final_rank, delta in rising[:10]:
+            lines.append(f"  {fmt_tier(name)} **{name}**: #{first_rank} → #{final_rank} (+{delta})")
+    else:
+        lines.append("  _(no significant movers in rank 250-500 this week)_")
+
     # (2) New this week
     lines.append("")
     lines.append("**🆕 New This Week**")
@@ -812,7 +893,7 @@ def format_seatalk_message(week_start, week_end, week_num, analysis, ai_commenta
     return "\n".join(lines)
 
 
-def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, prior_exists=True):
+def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, prior_exists=True, breakout=None):
     """Daily digest of top movers, new entries, and exits. Always sent to personal DM."""
     lines = [f"📊 **Steam Wishlist Daily — {today}**", ""]
 
@@ -830,6 +911,12 @@ def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, pr
         lines.append("📉 **Top Fallers**")
         for name, old_rank, new_rank, delta, tier, developer, publisher, genre in top_fallers:
             lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name}: #{old_rank} → #{new_rank} ({delta})")
+        lines.append("")
+
+    if breakout:
+        lines.append("🚀 **Breakout Watch (Rank 250-500)**")
+        for rank, name, tier, developer, publisher, genre, velocity_7d in breakout[:8]:
+            lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name} (#{rank}, +{velocity_7d} in 7d)")
         lines.append("")
 
     if new_entries:
