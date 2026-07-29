@@ -356,7 +356,7 @@ def run_daily(spreadsheet, dry_run=False):
                 (row[1], row[2], classify_game(row[6], row[5], row[4]),
                  row[4], row[5], row[6], row[11])
                 for row in rows
-                if int(row[1]) >= 250
+                if int(row[1]) > 100
                 and classify_game(row[6], row[5], row[4]) != "Triple A"
                 and isinstance(row[11], (int, float))
                 and row[11] >= BREAKOUT_THRESHOLD
@@ -427,13 +427,13 @@ def run_daily(spreadsheet, dry_run=False):
         ws_vel.append_rows(vel_tracker_rows, value_input_option="USER_ENTERED")
     print(f"  Updated '{VELOCITY_SHEET}' tab ({len(vel_tracker_rows)} games with velocity data).")
 
-    # Rising Stars sheet: rank 250-500, non-AAA, positive 7d velocity, sorted by velocity desc
+    # Rising Stars sheet: rank 101-500, non-AAA, positive 7d velocity, sorted by velocity desc
     rising_stars_rows = sorted(
         [
             [row[1], row[2], row[3], row[4], row[5], row[6],
              classify_game(row[6], row[5], row[4]), row[7], row[11]]
             for row in rows
-            if int(row[1]) >= 250
+            if int(row[1]) > 100
             and classify_game(row[6], row[5], row[4]) != "Triple A"
             and isinstance(row[11], (int, float)) and row[11] > 0
         ],
@@ -462,7 +462,7 @@ def run_daily(spreadsheet, dry_run=False):
             (row[1], row[2], classify_game(row[6], row[5], row[4]),
              row[4], row[5], row[6], row[11])
             for row in rows
-            if int(row[1]) >= 250
+            if int(row[1]) > 100
             and classify_game(row[6], row[5], row[4]) != "Triple A"
             and isinstance(row[11], (int, float))
             and row[11] >= BREAKOUT_THRESHOLD
@@ -618,12 +618,12 @@ def analyse_week(rows, prior_rows):
             tier_by_name[name]      = classify_game(genre, publisher, developer)
             developer_by_name[name] = developer
 
-    # Rising games: rank 250-500, non-AAA, meaningful weekly climb, seen ≥3 days
+    # Rising games: rank 101-500, non-AAA, meaningful weekly climb, seen ≥3 days
     rising_games = sorted(
         [
             (name, first_ranks[name], final_ranks[name], weekly_rank_delta[name])
             for name in weekly_rank_delta
-            if final_ranks.get(name, 0) >= 250
+            if final_ranks.get(name, 0) > 100
             and tier_by_name.get(name, "AA") != "Triple A"
             and weekly_rank_delta[name] >= RISING_WEEKLY_MIN
             and days_in_chart.get(name, 0) >= 3
@@ -850,7 +850,7 @@ def format_seatalk_message(week_start, week_end, week_num, analysis, ai_commenta
 
     # (1b) Rising Games: rank 250-500, non-AAA, climbing this week
     lines.append("")
-    lines.append("**🌱 Rising Games (Rank 250-500)**")
+    lines.append("**🌱 Rising Games (Rank 101-500)**")
     rising = analysis.get("rising_games", [])
     if rising:
         for name, first_rank, final_rank, delta in rising[:10]:
@@ -914,7 +914,7 @@ def _build_daily_digest(today, top_climbers, top_fallers, new_entries, exits, pr
         lines.append("")
 
     if breakout:
-        lines.append("🚀 **Breakout Watch (Rank 250-500)**")
+        lines.append("🚀 **Breakout Watch (Rank 101-500)**")
         for rank, name, tier, developer, publisher, genre, velocity_7d in breakout[:8]:
             lines.append(f"  {TIER_EMOJI.get(tier, '🎮')} {name} (#{rank}, +{velocity_7d} in 7d)")
         lines.append("")
