@@ -126,7 +126,8 @@ def steam_enrich(appid):
         )
         html = resp.text
         tags = re.findall(r'class="app_tag"[^>]*>\s*([^<\n]+?)\s*<', html)
-        tags = [t.strip() for t in tags if t.strip() and t.strip() != "+"]
+        tags = [t.strip().replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                for t in tags if t.strip() and t.strip() != "+"]
         if tags:
             result["tags"] = ", ".join(tags[:8])
     except Exception:
@@ -333,7 +334,8 @@ def main():
             resp  = requests.get(f"https://store.steampowered.com/app/{appid}/",
                                  headers=HEADERS, timeout=10)
             tags  = re.findall(r'class="app_tag"[^>]*>\s*([^<\n]+?)\s*<', resp.text)
-            tags  = [t.strip() for t in tags if t.strip() and t.strip() != "+"]
+            tags  = [t.strip().replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+                     for t in tags if t.strip() and t.strip() != "+"]
             if tags:
                 meta_lookup[name]["tags"] = ", ".join(tags[:8])
         except Exception:
