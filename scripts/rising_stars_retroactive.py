@@ -97,8 +97,12 @@ def find_appid_by_name(name):
         pass
     return ""
 
+def _clean(text):
+    return (text or "").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").strip()
+
 def steam_enrich(appid):
-    """Return {developer, publisher, genres, tags} for an appid via appdetails + store page."""
+    """Return {developer, publisher, genres, tags} for an appid via appdetails + store page.
+    Falls back to short description when no user-defined tags exist."""
     result = {"developer": "—", "publisher": "—", "genres": "—", "tags": "—"}
     if not appid:
         return result
@@ -126,14 +130,41 @@ def steam_enrich(appid):
         )
         html = resp.text
         tags = re.findall(r'class="app_tag"[^>]*>\s*([^<\n]+?)\s*<', html)
-        tags = [t.strip().replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                for t in tags if t.strip() and t.strip() != "+"]
+        tags = [_clean(t) for t in tags if _clean(t) and _clean(t) != "+"]
         if tags:
             result["tags"] = ", ".join(tags[:8])
+        else:
+            # Fallback: short description from store page
+            m = re.search(r'class="game_description_snippet"[^>]*>\s*([^<\n]+?)\s*<', html)
+            if m:
+                result["tags"] = _clean(m.group(1))[:160]
     except Exception:
         pass
 
     return result
+
+
+def web_search_description(name):
+    """DuckDuckGo instant answer API — last-resort fallback for game description/tags."""
+    try:
+        resp = requests.get(
+            "https://api.duckduckgo.com/",
+            params={"q": f"{name} steam game", "format": "json",
+                    "no_redirect": "1", "no_html": "1", "skip_disambig": "1"},
+            headers=HEADERS, timeout=10,
+        )
+        data = resp.json()
+        text = (data.get("AbstractText") or "").strip()
+        if len(text) > 20:
+            return text[:160]
+        for topic in data.get("RelatedTopics", [])[:4]:
+            if isinstance(topic, dict):
+                text = (topic.get("Text") or "").strip()
+                if len(text) > 20:
+                    return text[:160]
+    except Exception:
+        pass
+    return "—"
 
 
 def _get_seatalk_token(app_id, app_secret):
@@ -288,21 +319,20 @@ def main():
     print(f"  Games 101-500 on {latest_date}: {len(all_ranks_101plus)} total "
           f"({len(climbers)} climbers)")
 
-    # Live-enrich top climbers that are missing metadata
-    top_climbers = climbers[:30]
-    missing = [r for r in top_climbers
-               if meta_lookup.get(r["name"], {}).get("developer", "—") == "—"]
+    TIER_LABEL = {"Indie": "Indie", "Triple A": "AAA", "AA": "AA", "Early Access": "Early Access"}
+
+    # ── Phase 1: enrich games with missing developer data (no appid captured) ──
+    missing = [r for r in climbers if meta_lookup.get(r["name"], {}).get("developer", "—") == "—"]
     if missing:
-        print(f"  Live-enriching {len(missing)} games with missing metadata...")
-    for r in missing:
+        print(f"  Phase 1: enriching {len(missing)} games with no metadata...")
+    for i, r in enumerate(missing):
         name  = r["name"]
         appid = appid_lookup.get(name, "")
         if not appid:
-            print(f"    [{name}] no appid — searching by name...")
             appid = find_appid_by_name(name)
             if appid:
-                print(f"    [{name}] found appid {appid}")
-            time.sleep(0.5)
+                appid_lookup[name] = appid
+            time.sleep(0.4)
         if appid:
             enriched = steam_enrich(appid)
             meta_lookup[name].update({
@@ -314,45 +344,105 @@ def main():
                                             enriched["publisher"],
                                             enriched["developer"]),
             })
-            print(f"    [{name}] tags: {enriched['tags']}")
-            time.sleep(0.5)
+            time.sleep(0.4)
         else:
-            print(f"    [{name}] could not find appid — skipping")
+            # DuckDuckGo fallback when no Steam page found
+            desc = web_search_description(name)
+            if desc != "—":
+                meta_lookup[name]["tags"] = f"[web] {desc}"
+            time.sleep(0.5)
+        if (i + 1) % 20 == 0:
+            print(f"    {i+1}/{len(missing)} done")
 
-    # Also fetch user-defined tags for games that do have dev data but no tags yet
-    no_tags = [r for r in top_climbers
-               if r not in missing
-               and meta_lookup.get(r["name"], {}).get("tags", "—") == "—"
+    # ── Phase 2: fetch store page tags for games that have dev data but no tags ──
+    no_tags = [r for r in climbers
+               if meta_lookup.get(r["name"], {}).get("tags", "—") == "—"
                and appid_lookup.get(r["name"], "")]
     if no_tags:
-        print(f"  Fetching store tags for {len(no_tags)} games...")
-    for r in no_tags:
+        print(f"  Phase 2: fetching store tags/descriptions for {len(no_tags)} games...")
+    for i, r in enumerate(no_tags):
         name  = r["name"]
         appid = appid_lookup.get(name, "")
         try:
             time.sleep(0.3)
-            resp  = requests.get(f"https://store.steampowered.com/app/{appid}/",
-                                 headers=HEADERS, timeout=10)
-            tags  = re.findall(r'class="app_tag"[^>]*>\s*([^<\n]+?)\s*<', resp.text)
-            tags  = [t.strip().replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-                     for t in tags if t.strip() and t.strip() != "+"]
+            resp = requests.get(f"https://store.steampowered.com/app/{appid}/",
+                                headers=HEADERS, timeout=10)
+            html = resp.text
+            tags = re.findall(r'class="app_tag"[^>]*>\s*([^<\n]+?)\s*<', html)
+            tags = [_clean(t) for t in tags if _clean(t) and _clean(t) != "+"]
             if tags:
                 meta_lookup[name]["tags"] = ", ".join(tags[:8])
+            else:
+                # Short description fallback
+                m = re.search(r'class="game_description_snippet"[^>]*>\s*([^<\n]+?)\s*<', html)
+                if m:
+                    meta_lookup[name]["tags"] = _clean(m.group(1))[:160]
         except Exception:
             pass
+        if (i + 1) % 50 == 0:
+            print(f"    {i+1}/{len(no_tags)} done")
 
-    TIER_LABEL = {"Indie": "Indie", "Triple A": "AAA", "AA": "AA", "Early Access": "Early Access"}
+    # ── Phase 3: DuckDuckGo for anything still blank ──
+    still_blank = [r for r in climbers if meta_lookup.get(r["name"], {}).get("tags", "—") == "—"]
+    if still_blank:
+        print(f"  Phase 3: web search fallback for {len(still_blank)} remaining games...")
+    for r in still_blank:
+        name = r["name"]
+        desc = web_search_description(name)
+        if desc != "—":
+            meta_lookup[name]["tags"] = f"[web] {desc}"
+        time.sleep(0.5)
 
-    # Build message — climbers only
+    print(f"  Enrichment complete. Writing {len(climbers)} climbers to Google Sheet...")
+
+    # ── Write ALL climbers to a Google Sheet tab ──
+    def get_or_create_ws(ss, name, rows=1000, cols=10):
+        try:
+            return ss.worksheet(name)
+        except Exception:
+            return ss.add_worksheet(name, rows=rows, cols=cols)
+
+    snap_ws = get_or_create_ws(spreadsheet, "Rising Stars Snapshot", rows=1000, cols=10)
+    snap_ws.clear()
+    snap_ws.append_row(
+        ["Date", "Rank (latest)", "Game Name", "Tier", "Developer", "Publisher",
+         "Tags / Description", "Rank Change", "Span (days)", "Est. Wishlists"],
+        value_input_option="USER_ENTERED",
+    )
+    sheet_rows = []
+    for r in climbers:
+        name = r["name"]
+        meta = meta_lookup.get(name, {})
+        dev  = meta.get("developer", "—")
+        pub  = meta.get("publisher", "—")
+        tags = meta.get("tags", "—") if meta.get("tags", "—") != "—" else meta.get("genre", "—")
+        sheet_rows.append([
+            latest_date,
+            r["latest_rank"],
+            name,
+            TIER_LABEL.get(meta.get("tier", "AA"), "AA"),
+            dev,
+            pub,
+            tags,
+            f"+{r['delta']}",
+            r["days"],
+            r["est_wishlists"],
+        ])
+    if sheet_rows:
+        snap_ws.append_rows(sheet_rows, value_input_option="USER_ENTERED")
+    print(f"  Written {len(sheet_rows)} rows to 'Rising Stars Snapshot'.")
+
+    # ── Build Seatalk DM: top 30 climbers summary ──
+    top30 = climbers[:30]
     lines = [
         f"🌱 **Rising Stars ({earliest_date} → {latest_date}, {span_days}d)**",
-        f"Rank 101-500 games gaining ground — sorted by positions climbed",
+        f"Rank 101-500 climbers — top 30 of {len(climbers)} | full list in 'Rising Stars Snapshot' sheet",
         "",
         "📈 **Climbers**",
         "",
     ]
 
-    for r in top_climbers:
+    for r in top30:
         name       = r["name"]
         meta       = meta_lookup.get(name, {})
         tier_label = TIER_LABEL.get(meta.get("tier", "AA"), meta.get("tier", "AA"))
@@ -360,7 +450,6 @@ def main():
         dev        = meta.get("developer", "—")
         pub        = meta.get("publisher", "—")
         credit     = dev if (dev == pub or pub in ("—", "")) else f"{dev} / {pub}"
-        # Prefer user-defined tags; fall back to official genres
         tags_str   = meta.get("tags", "—")
         if tags_str == "—":
             tags_str = meta.get("genre", "—")
@@ -371,7 +460,7 @@ def main():
         lines.append(f"  _{credit} | {tags_str}_")
         lines.append("")
 
-    if not top_climbers:
+    if not top30:
         lines.append("_(No rank climbers in rank 101-500 yet — check back after more days of data)_")
 
     lines.append(f"_Data from {len(top500_dates)} captured day(s) · {len(climbers)} climbers / {stable_ct} stable / {faller_ct} fallers_")
