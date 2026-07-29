@@ -56,21 +56,29 @@ def classify_game(genre, publisher, developer):
     return "AA"
 
 def estimate_wishlists(rank):
-    """Rough rank-based estimate using GDC Pro and public benchmark data."""
-    if rank <= 10:  return "~1.5M-3M+"
-    if rank <= 25:  return "~1M-1.5M"
-    if rank <= 50:  return "~700K-1M"
-    if rank <= 80:  return "~500K-800K"
-    if rank <= 100: return "~350K-600K"
-    if rank <= 130: return "~250K-400K"
-    if rank <= 160: return "~170K-280K"
-    if rank <= 200: return "~100K-200K"
-    if rank <= 250: return "~70K-130K"
-    if rank <= 300: return "~50K-90K"
-    if rank <= 350: return "~35K-65K"
-    if rank <= 400: return "~25K-50K"
-    if rank <= 450: return "~18K-38K"
-    return "~12K-28K"
+    """Rank-based wishlist estimate.
+    Calibrated from two confirmed data points (Jul 2026):
+      - rank ~90  ≈ 600K  (GDC Pro chart data)
+      - rank ~366 > 100K  (Sandcastle Steam community post)
+    Fit: ~170M × rank^-1.28. Ranges are ±40% around the central estimate.
+    Caveat: Steam ranks by velocity (recent adds), not total count.
+    Older games accumulate wishlists over time and may sit higher than
+    their rank implies; newer games at the same rank may have fewer.
+    """
+    if rank <= 10:  return "~1.5M-4M+"
+    if rank <= 25:  return "~900K-1.8M"
+    if rank <= 50:  return "~600K-1.1M"
+    if rank <= 80:  return "~430K-760K"
+    if rank <= 100: return "~340K-600K"
+    if rank <= 130: return "~270K-480K"
+    if rank <= 160: return "~215K-385K"
+    if rank <= 200: return "~170K-305K"
+    if rank <= 250: return "~135K-240K"
+    if rank <= 300: return "~105K-190K"
+    if rank <= 350: return "~90K-160K"
+    if rank <= 400: return "~75K-140K"
+    if rank <= 450: return "~65K-120K"
+    return "~55K-100K"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; IndieGameResearch/1.0)"}
 
