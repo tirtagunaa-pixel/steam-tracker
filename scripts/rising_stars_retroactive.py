@@ -146,9 +146,9 @@ def main():
 
     print(f"  Comparing: {earliest_date} → {latest_date} ({span_days} days)")
 
-    # Build rank lookup per date per game
+    # Build rank lookup per date per game; also store metadata
     rank_on_date = defaultdict(dict)  # {name: {date: rank}}
-    tier_lookup  = {}
+    meta_lookup  = {}                 # {name: {tier, developer, publisher, genre}}
     for row in data_rows:
         if len(row) < 7 or not row[0] or not row[1] or not row[2]:
             continue
@@ -161,20 +161,24 @@ def main():
         name = row[2]
         date = row[0]
         rank_on_date[name][date] = rank
-        if name not in tier_lookup:
-            genre     = row[6] if len(row) > 6 else "—"
-            publisher = row[5] if len(row) > 5 else "—"
+        if name not in meta_lookup:
             developer = row[4] if len(row) > 4 else "—"
-            tier_lookup[name] = classify_game(genre, publisher, developer)
+            publisher = row[5] if len(row) > 5 else "—"
+            genre     = row[6] if len(row) > 6 else "—"
+            meta_lookup[name] = {
+                "tier":      classify_game(genre, publisher, developer),
+                "developer": developer or "—",
+                "publisher": publisher or "—",
+                "genre":     genre or "—",
+            }
 
     # Analyse games that appeared in the 101-500 range on the latest date
     results = []
     for name, date_ranks in rank_on_date.items():
         latest_rank = date_ranks.get(latest_date)
         if latest_rank is None or latest_rank <= 100:
-            continue  # not in target range today
+            continue
 
-        # Find first rank in our Top-500 window
         dates_in_window = sorted([d for d in date_ranks if d in top500_dates])
         if not dates_in_window:
             continue
@@ -184,65 +188,57 @@ def main():
                         datetime.strptime(first_date, "%Y-%m-%d")).days
 
         delta = first_rank - latest_rank  # positive = climbed
-        tier  = tier_lookup.get(name, "AA")
+        meta  = meta_lookup.get(name, {})
 
         results.append({
-            "name":         name,
-            "tier":         tier,
-            "first_rank":   first_rank,
-            "latest_rank":  latest_rank,
-            "delta":        delta,
-            "days":         days_tracked,
+            "name":          name,
+            "tier":          meta.get("tier", "AA"),
+            "developer":     meta.get("developer", "—"),
+            "publisher":     meta.get("publisher", "—"),
+            "genre":         meta.get("genre", "—"),
+            "first_rank":    first_rank,
+            "latest_rank":   latest_rank,
+            "delta":         delta,
+            "days":          days_tracked,
             "est_wishlists": estimate_wishlists(latest_rank),
         })
 
-    # Sort: biggest climbers first, then stable, then fallers
     climbers = sorted([r for r in results if r["delta"] > 0], key=lambda x: x["delta"], reverse=True)
-    stable   = sorted([r for r in results if r["delta"] == 0], key=lambda x: x["latest_rank"])
-    fallers  = sorted([r for r in results if r["delta"] < 0], key=lambda x: x["delta"])
+    stable_ct = sum(1 for r in results if r["delta"] == 0)
+    faller_ct = sum(1 for r in results if r["delta"] < 0)
 
     print(f"  Games 101-500 on {latest_date}: {len(results)} total "
-          f"({len(climbers)} climbers, {len(stable)} stable, {len(fallers)} fallers)")
+          f"({len(climbers)} climbers, {stable_ct} stable, {faller_ct} fallers)")
 
-    # Build message
+    TIER_LABEL = {"Indie": "Indie", "Triple A": "AAA", "AA": "AA", "Early Access": "Early Access"}
+
+    # Build message — climbers only
     lines = [
-        f"🌱 **Rising Stars Snapshot ({earliest_date} → {latest_date}, {span_days}d)**",
-        f"Games ranked 101-500 on {latest_date} — rank change from first appearance",
+        f"🌱 **Rising Stars ({earliest_date} → {latest_date}, {span_days}d)**",
+        f"Rank 101-500 games gaining ground — sorted by positions climbed",
+        "",
+        "📈 **Climbers**",
         "",
     ]
 
-    if climbers:
-        lines.append("📈 **Climbers (rank improved)**")
-        for r in climbers[:25]:
-            emoji = TIER_EMOJI.get(r["tier"], "🔷")
-            days_str = f"{r['days']}d" if r["days"] > 0 else "same day"
-            lines.append(
-                f"  {emoji} **{r['name']}**: #{r['first_rank']} → #{r['latest_rank']} "
-                f"(+{r['delta']} in {days_str}) | {r['est_wishlists']}"
-            )
+    for r in climbers[:30]:
+        tier_label = TIER_LABEL.get(r["tier"], r["tier"])
+        days_str   = f"{r['days']}d" if r["days"] > 0 else "today"
+        dev        = r["developer"]
+        pub        = r["publisher"]
+        credit     = dev if (dev == pub or pub in ("—", "")) else f"{dev} / {pub}"
+        genre      = r["genre"] if r["genre"] not in ("—", "") else "—"
+        lines.append(
+            f"**{r['name']}** [{tier_label}] — #{r['first_rank']} → #{r['latest_rank']} "
+            f"(+{r['delta']} in {days_str}) | {r['est_wishlists']}"
+        )
+        lines.append(f"  _{credit} | {genre}_")
         lines.append("")
 
-    if fallers:
-        lines.append("📉 **Fallers (rank dropped)**")
-        for r in fallers[:15]:
-            emoji = TIER_EMOJI.get(r["tier"], "🔷")
-            days_str = f"{r['days']}d" if r["days"] > 0 else "same day"
-            lines.append(
-                f"  {emoji} **{r['name']}**: #{r['first_rank']} → #{r['latest_rank']} "
-                f"({r['delta']} in {days_str}) | {r['est_wishlists']}"
-            )
-        lines.append("")
+    if not climbers:
+        lines.append("_(No rank climbers in rank 101-500 yet — check back after more days of data)_")
 
-    if stable:
-        lines.append(f"➡️ **Stable** ({len(stable)} games — rank unchanged)")
-        for r in stable[:10]:
-            emoji = TIER_EMOJI.get(r["tier"], "🔷")
-            lines.append(f"  {emoji} {r['name']} (#{r['latest_rank']}) | {r['est_wishlists']}")
-        if len(stable) > 10:
-            lines.append(f"  _(+ {len(stable)-10} more)_")
-        lines.append("")
-
-    lines.append(f"_Data from {len(top500_dates)} captured days in window_")
+    lines.append(f"_Data from {len(top500_dates)} captured day(s) · {len(climbers)} climbers / {stable_ct} stable / {faller_ct} fallers_")
 
     message = "\n".join(lines).rstrip()
     print("\n" + "="*60)
